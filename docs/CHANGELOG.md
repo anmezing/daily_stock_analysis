@@ -73,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 美股/港股个股数据源改为配置驱动的 API 优先链：先尝试已配置且可用的 Twelve Data / Longbridge，再由 `YfinanceFetcher` 固定兜底；美股指数继续保持 YFinance 优先，A 股路由不变。
 - [文档] `.env.example`、`README.md`、`docs/full-guide.md`、`docs/full-guide_EN.md`、`docs/README_EN.md`、`docs/README_CHT.md` 同步补充 Twelve Data 配置项与美股/港股 API 优先链说明。
 - [测试] 补充 Twelve Data fetcher、US/HK API priority routing 与美股指数保序回归测试。
+- [修复] 回测执行胜率与平均模拟收益改为只统计 long 仓位成交，卖出/观望等现金信号不再以 0% 收益率稀释指标；方向准确率仍覆盖全部记录，并在 `diagnostics.metric_scope` 标注各指标口径。
+- [修复] 回测 long 仓位结果改为跟随模拟成交（止盈/止损/缺口），不再出现“先止损、期末回涨仍算赢”的口径冲突。
+- [修复] 回测次日开盘跳空穿越止盈/止损时按开盘价成交（`gap_stop` / `gap_take_profit`），不再因目标价失效而丢弃止损、继续持有到窗口结束。
+- [修复] 回测 `insufficient_data` / `error` 记录在后续运行中自动重试，不再必须先执行 `force` 才能重算。
+- [改进] 回测引擎版本追加逻辑修订后缀（如 `v1@no-x2`），新旧指标口径的结果分开汇总，避免混算。
+- [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
+- [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
+- [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。
+- [文档] `docs/DATA_SOURCE_PRIORITY.md` 与 `.env.example` 同步补充 Finnhub、AlphaVantage 配置项与美股/港股链路差异。
+- [修复] `trading_calendar.get_market_now()` 缺少 `timezone` 导入，未知市场或时区解析失败时会 `NameError`；补齐导入后美股 DST 时钟可正常返回带时区的当前时间。
+- [修复] 港股实时行情不再每只股票都调用一次 `ak.stock_hk_spot_em()` 全市场快照：改为进程内缓存（20 分钟 TTL、失败结果 30 秒内不重试、并发冷启动合并为一次请求、空快照不写成功缓存），港股名称查询也会复用同一份快照。
+- [修复] `YfinanceFetcher` 的美股/港股实时行情不再把 `pe_ratio` / `pb_ratio` 固定为 `None`，改为复用已获取的 `ticker.info`（`trailingPE` / `priceToBook`）填充估值字段，不额外发请求；0、负数、NaN、inf 视为无数据。
+- [测试] `tests/conftest.py` 增加数据库隔离：强制测试使用临时 SQLite 并屏蔽 `.env` 中的 `DATABASE_URL`，避免本地跑测试误写线上 PostgreSQL/Supabase；同时移除 `test_tushare_fetcher_get_stock_list` 在导入期加载项目 `.env` 的副作用。
+- [测试] 修复 6 条长期失败用例：`test_report_integrity` 补齐 `ideal_buy`/`secondary_buy` 并新增买点相同必须失败的用例；`test_market_analyzer_generate_text` stub 全局限流器，避免限流 sleep 打断重试退避断言；`test_search_news_freshness` 改用可耗尽队列 side_effect，兼容搜索引擎回退触发的额外查询。
 
 ## [3.11.0] - 2026-03-27
 ## [3.12.0] - 2026-04-01

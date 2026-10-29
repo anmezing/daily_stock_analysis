@@ -29,9 +29,13 @@
 | **4** | YfinanceFetcher | Yahoo Finance（免费，全球市场） | 美股/港股/A股 |
 | **-** | TwelveDataFetcher | Twelve Data API（需配置 API Key） | 美股/港股 |
 | **-** | LongbridgeFetcher | 长桥证券 API（需配置 API Key） | 美股/港股 |
+| **-** | FinnhubFetcher | Finnhub API（需配置 API Key，免费版 60 calls/min） | 美股 |
+| **-** | AlphaVantageFetcher | AlphaVantage API（需配置 API Key，免费版 25 calls/day） | 美股 |
 
 **注意**：
-- TwelveData 和 Longbridge 不参与通用优先级排序，仅在美股/港股 API 优先链中使用
+- TwelveData、Longbridge、Finnhub、AlphaVantage 不参与通用优先级排序，仅在美股/港股 API 优先链中使用
+- Finnhub / AlphaVantage 是纯美股数据源；港股链路会通过 `supports_code()` 把它们过滤掉，不会空跑
+- AlphaVantage 免费档日线只返回最近 100 个交易日且限 25 calls/day，定位是 Finnhub 之后的次级兜底
 - IBKR 虽然优先级为 2，但需要本地运行 TWS 或 Gateway，不适用于 GitHub Actions 等云环境
 
 ---
@@ -105,18 +109,20 @@
 ```
 1. TwelveDataFetcher   → 如果配置了 TWELVEDATA_API_KEY
 2. LongbridgeFetcher   → 如果配置了 LONGBRIDGE_APP_KEY
-3. IBKRFetcher         → 如果本地运行了 TWS/Gateway
-4. YfinanceFetcher     → 永远作为最后兜底
+3. FinnhubFetcher      → 如果配置了 FINNHUB_API_KEY
+4. AlphaVantageFetcher → 如果配置了 ALPHAVANTAGE_API_KEY
+5. IBKRFetcher         → 如果本地运行了 TWS/Gateway
+6. YfinanceFetcher     → 永远作为最后兜底
 ```
 
 **特点**：
-- API 数据源（TwelveData/Longbridge/IBKR）优先
+- API 数据源（TwelveData/Longbridge/Finnhub/AlphaVantage/IBKR）优先
 - YFinance 作为免费兜底方案
 - 支持字段补充机制
 
 ### 港股实时行情
 
-**降级顺序**：与美股相同
+**降级顺序**：与美股相同，但 Finnhub / AlphaVantage 不参与（纯美股源，链路会按 `supports_code()` 自动跳过）
 
 ```
 1. TwelveDataFetcher   → 如果配置了 TWELVEDATA_API_KEY
@@ -124,6 +130,8 @@
 3. IBKRFetcher         → 如果本地运行了 TWS/Gateway
 4. YfinanceFetcher     → 永远作为最后兜底
 ```
+
+**港股实时缓存**：`AkshareFetcher` 的 `ak.stock_hk_spot_em()` 返回的是全市场快照，单次成本高。现在按进程内缓存复用（默认 20 分钟 TTL，失败结果 30 秒内不重试，并发冷启动只会真正拉取一次），因此同一次分析里多只港股不会重复拉全市场。
 
 ### 美股指数实时行情
 

@@ -98,6 +98,8 @@ npm run lint
 npm run build
 ```
 
+> **测试数据库隔离**：`tests/conftest.py` 会强制测试使用临时 SQLite，并屏蔽 `.env` 里的 `DATABASE_URL`，避免测试写到你自己的 PostgreSQL / Supabase。确实需要连外部库时，设置 `DSA_ALLOW_EXTERNAL_DB_IN_TESTS=1` 再运行 pytest。
+
 ## 📋 优先贡献方向
 
 查看 [Roadmap](README.md#-roadmap) 了解当前需要的功能：

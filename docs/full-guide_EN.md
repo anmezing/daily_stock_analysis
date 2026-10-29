@@ -617,17 +617,23 @@ The backtesting module automatically validates historical AI analysis records ag
 1. Selects `AnalysisHistory` records past the cooldown period (default 14 days)
 2. Fetches daily bar data after the analysis date (forward bars)
 3. Infers expected direction from the operation advice and compares against actual movement
-4. Evaluates stop-loss/take-profit hit conditions and simulates execution returns
+4. Resolves the entry price from `BACKTEST_ENTRY_MODE` (next open by default), evaluates stop-loss/take-profit hits and simulates execution returns
 5. Aggregates into overall and per-stock performance metrics
+
+> If the next-bar open already gaps through a take-profit/stop-loss, the trade exits at that open (`gap_stop` / `gap_take_profit`) instead of discarding the target and holding to window end.
+> Incomplete rows (`insufficient_data` / `error`) are retried on later runs; `force` is not required.
+> The stored engine version carries a logic revision suffix (e.g. `v1@no-x2`) so old and new metric definitions never share one summary.
 
 ### Operation Advice Mapping
 
-| Operation Advice | Position | Expected Direction | Win Condition |
+| Operation Advice | Position | Expected Direction | Direction Check (`direction_correct`) |
 |-----------------|----------|-------------------|---------------|
-| Buy / Add / Strong Buy | long | up | Return >= neutral band |
-| Sell / Reduce / Strong Sell | cash | down | Decline >= neutral band |
-| Hold | long | not_down | No significant decline |
-| Wait / Observe | cash | flat | Price within neutral band |
+| Buy / Add / Strong Buy | long | up | End-of-window return >= neutral band |
+| Sell / Reduce / Strong Sell | cash | down | End-of-window decline >= neutral band |
+| Hold | long | not_down | No significant end-of-window decline |
+| Wait / Observe | cash | flat | End-of-window price within neutral band |
+
+> `outcome` and `win_rate_pct` describe **simulated long executions only** (stop-loss/take-profit, gap fills). Cash signals place no trade and are excluded from the execution win rate. Their advice quality shows up in `direction_accuracy_pct` and `advice_breakdown`.
 
 ### Configuration
 
@@ -639,6 +645,7 @@ Set the following variables in `.env` (all optional, have defaults):
 | `BACKTEST_EVAL_WINDOW_DAYS` | `10` | Evaluation window (trading days) |
 | `BACKTEST_MIN_AGE_DAYS` | `14` | Only backtest records older than N days to avoid incomplete data |
 | `BACKTEST_ENGINE_VERSION` | `v1` | Engine version, used to distinguish results when logic is updated |
+| `BACKTEST_ENTRY_MODE` | `next_open` | Entry price basis: `next_open` / `analysis_close` / `next_close` |
 | `BACKTEST_NEUTRAL_BAND_PCT` | `2.0` | Neutral band threshold (%), ±2% treated as range-bound |
 
 ### Auto-run
@@ -649,12 +656,13 @@ Backtesting triggers automatically after the daily analysis flow completes (non-
 
 | Metric | Description |
 |--------|-------------|
-| `direction_accuracy_pct` | Direction prediction accuracy (expected direction matches actual) |
-| `win_rate_pct` | Win rate (wins / (wins + losses), excludes neutral) |
-| `avg_stock_return_pct` | Average stock return percentage |
-| `avg_simulated_return_pct` | Average simulated execution return (including SL/TP exits) |
+| `direction_accuracy_pct` | Direction prediction accuracy: all completed rows, judged by end-of-window move |
+| `win_rate_pct` | Execution win rate: simulated long fills only, excludes cash signals and neutral |
+| `avg_stock_return_pct` | Average stock return: all completed rows |
+| `avg_simulated_return_pct` | Average simulated execution return: long only, includes SL/TP and gap fills |
 | `stop_loss_trigger_rate` | Stop-loss trigger rate (only counts records with SL configured) |
 | `take_profit_trigger_rate` | Take-profit trigger rate (only counts records with TP configured) |
+| `diagnostics.metric_scope` | Declares each metric's basis (`long_simulated` / `long_only` / `all_completed`) |
 
 ---
 

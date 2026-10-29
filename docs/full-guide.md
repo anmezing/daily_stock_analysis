@@ -796,17 +796,24 @@ python main.py --debug
 1. 选取已过冷却期（默认 14 天）的 `AnalysisHistory` 记录
 2. 获取分析日之后的日线数据（前向 K 线）
 3. 根据操作建议推断预期方向，与实际走势对比
-4. 评估止盈/止损命中情况，模拟执行收益
+4. 按 `BACKTEST_ENTRY_MODE` 确定入场价（默认次日开盘），评估止盈/止损命中并模拟执行收益
 5. 汇总为整体和单股两个维度的表现指标
+
+> 入场次日开盘若已跳空穿越止盈/止损，按开盘价成交（`gap_stop` / `gap_take_profit`），不会丢弃目标价继续持有到窗口结束。
+> 未完成记录（`insufficient_data` / `error`）会在后续运行中自动重试，不需要先执行 `force`。
+> 引擎写入版本号会追加逻辑修订后缀（如 `v1@no-x2`），旧口径结果与新口径结果不会混在同一份汇总里。
 
 ### 操作建议映射
 
-| 操作建议 | 仓位推断 | 预期方向 | 胜利条件 |
+| 操作建议 | 仓位推断 | 预期方向 | 方向判定（`direction_correct`） |
 |---------|---------|---------|---------|
-| 买入/加仓/strong buy | long | up | 涨幅 ≥ 中性带 |
-| 卖出/减仓/strong sell | cash | down | 跌幅 ≥ 中性带 |
-| 持有/hold | long | not_down | 未显著下跌 |
-| 观望/等待/wait | cash | flat | 价格在中性带内 |
+| 买入/加仓/strong buy | long | up | 窗口末涨幅 ≥ 中性带 |
+| 卖出/减仓/strong sell | cash | down | 窗口末跌幅 ≥ 中性带 |
+| 持有/hold | long | not_down | 窗口末未显著下跌 |
+| 观望/等待/wait | cash | flat | 窗口末价格在中性带内 |
+
+> `outcome` 与 `win_rate_pct` 只描述 **long 仓位的模拟成交结果**（含止盈止损、缺口成交）；现金信号没有成交，不参与执行胜率。
+> 现金信号的建议质量由 `direction_accuracy_pct` 与 `advice_breakdown` 体现。
 
 ### 配置
 
@@ -818,6 +825,7 @@ python main.py --debug
 | `BACKTEST_EVAL_WINDOW_DAYS` | `10` | 评估窗口（交易日数） |
 | `BACKTEST_MIN_AGE_DAYS` | `14` | 仅回测 N 天前的记录，避免数据不完整 |
 | `BACKTEST_ENGINE_VERSION` | `v1` | 引擎版本号，升级逻辑时用于区分结果 |
+| `BACKTEST_ENTRY_MODE` | `next_open` | 入场价口径：`next_open` / `analysis_close` / `next_close` |
 | `BACKTEST_NEUTRAL_BAND_PCT` | `2.0` | 中性区间阈值（%），±2% 内视为震荡 |
 
 ### 自动运行
@@ -828,12 +836,13 @@ python main.py --debug
 
 | 指标 | 说明 |
 |------|------|
-| `direction_accuracy_pct` | 方向预测准确率（预期方向与实际一致） |
-| `win_rate_pct` | 胜率（胜 / (胜+负)，不含中性） |
-| `avg_stock_return_pct` | 平均股票收益率 |
-| `avg_simulated_return_pct` | 平均模拟执行收益率（含止盈止损退出） |
+| `direction_accuracy_pct` | 方向预测准确率：全部已完成记录，按窗口末涨跌判定 |
+| `win_rate_pct` | 执行胜率：仅统计 long 仓位模拟成交，不含现金信号与中性 |
+| `avg_stock_return_pct` | 平均股票收益率：全部已完成记录 |
+| `avg_simulated_return_pct` | 平均模拟执行收益率：仅统计 long 仓位，含止盈止损与缺口成交 |
 | `stop_loss_trigger_rate` | 止损触发率（仅统计配置了止损的记录） |
 | `take_profit_trigger_rate` | 止盈触发率（仅统计配置了止盈的记录） |
+| `diagnostics.metric_scope` | 声明各指标的统计口径（`long_simulated` / `long_only` / `all_completed`） |
 
 ---
 

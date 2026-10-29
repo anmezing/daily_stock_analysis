@@ -10,6 +10,8 @@
 | **LongbridgeFetcher** | 美港 | ✅ | ✅ | ✅ | 免费 | ✅ | ⭐⭐ 一般 | 全部 |
 | **TwelveDataFetcher** | 美港 | ⚠️ | ⚠️ | ❌ | 付费 | ✅ | ⭐ 简单 | 全部 |
 | **YfinanceFetcher** | 全球 | ✅ | ❌ | ❌ | 免费 | ❌ | ⭐ 简单 | 全部 |
+| **FinnhubFetcher** | 美股 | ✅ | ❌ | ❌ | 免费（60 calls/min） | ✅ | ⭐ 简单 | 全部 |
+| **AlphaVantageFetcher** | 美股 | ✅ | ❌ | ❌ | 免费（25 calls/day） | ✅ | ⭐ 简单 | 全部 |
 | **TushareFetcher** | A股 | ✅ | ⚠️ | ✅ | 付费 | ✅ | ⭐⭐ 一般 | 全部 |
 
 **图例**：

@@ -745,6 +745,8 @@ class DataFetcherManager:
         from .twelvedata_fetcher import TwelveDataFetcher
         from .longbridge_fetcher import LongbridgeFetcher
         from .ibkr_fetcher import IBKRFetcher
+        from .finnhub_fetcher import FinnhubFetcher
+        from .alphavantage_fetcher import AlphaVantageFetcher
         
         # 创建所有数据源实例（优先级在各 Fetcher 的 __init__ 中确定）
         efinance = EfinanceFetcher()
@@ -756,6 +758,8 @@ class DataFetcherManager:
         twelvedata = TwelveDataFetcher()
         longbridge = LongbridgeFetcher()
         ibkr = IBKRFetcher()        # Interactive Brokers
+        finnhub = FinnhubFetcher()  # 美股专用，未配置 Key 时不参与链路
+        alphavantage = AlphaVantageFetcher()  # 美股专用，未配置 Key 时不参与链路
 
         # 初始化数据源列表
         self._fetchers = [
@@ -769,6 +773,18 @@ class DataFetcherManager:
             longbridge,
             ibkr,
         ]
+
+        if finnhub.is_api_ready():
+            self._fetchers.append(finnhub)
+            logger.info("[FinnhubFetcher] ✅ FINNHUB_API_KEY 已配置，美股 API 链路已加入 Finnhub")
+        else:
+            logger.debug("[FinnhubFetcher] FINNHUB_API_KEY 未配置，跳过")
+
+        if alphavantage.is_api_ready():
+            self._fetchers.append(alphavantage)
+            logger.info("[AlphaVantageFetcher] ✅ ALPHAVANTAGE_API_KEY 已配置，美股 API 链路已加入 AlphaVantage")
+        else:
+            logger.debug("[AlphaVantageFetcher] ALPHAVANTAGE_API_KEY 未配置，跳过")
 
         # 按优先级排序（Tushare 如果配置了 Token 且初始化成功，优先级为 0）
         self._fetchers.sort(key=lambda f: f.priority)
@@ -828,7 +844,7 @@ class DataFetcherManager:
         return selected
 
     def _is_us_hk_api_fetcher_ready(self, fetcher: BaseFetcher) -> bool:
-        if fetcher.name not in {"TwelveDataFetcher", "LongbridgeFetcher"}:
+        if fetcher.name not in {"TwelveDataFetcher", "LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher"}:
             return False
         readiness = getattr(fetcher, "is_api_ready", None)
         if callable(readiness):
@@ -983,9 +999,25 @@ class DataFetcherManager:
         normalized = normalize_stock_code(stock_code)
         if _market_tag(normalized) not in {"us", "hk"}:
             return []
-        api_fetchers = self._get_us_hk_api_fetchers()
+        api_fetchers = [
+            fetcher
+            for fetcher in self._get_us_hk_api_fetchers()
+            if self._fetcher_supports_code(fetcher, normalized)
+        ]
         yfinance_fetchers = self._named_fetchers("YfinanceFetcher")
         return self._dedupe_fetchers(api_fetchers + yfinance_fetchers)
+
+    @staticmethod
+    def _fetcher_supports_code(fetcher: BaseFetcher, stock_code: str) -> bool:
+        """数据源声明了 supports_code 时按其能力过滤，否则视为通用。"""
+        supports = getattr(fetcher, "supports_code", None)
+        if not callable(supports):
+            return True
+        try:
+            return bool(supports(stock_code))
+        except Exception as exc:
+            logger.debug("[数据源链路] %s 市场能力判断失败: %s", fetcher.name, exc)
+            return False
     
     def get_daily_data(
         self, 

@@ -678,6 +678,12 @@ class Config:
     twelvedata_timeout_seconds: int = 10
     twelvedata_us_hk_enable: bool = True
 
+    # === Finnhub 数据源配置（仅美股）===
+    finnhub_api_key: Optional[str] = None
+
+    # === AlphaVantage 数据源配置（仅美股）===
+    alphavantage_api_key: Optional[str] = None
+
     # === Longbridge 数据源配置 ===
     longbridge_app_key: Optional[str] = None
     longbridge_app_secret: Optional[str] = None
@@ -1280,6 +1286,8 @@ class Config:
             twelvedata_priority=parse_env_int(os.getenv('TWELVEDATA_PRIORITY'), 2, field_name='TWELVEDATA_PRIORITY', minimum=0),
             twelvedata_timeout_seconds=parse_env_int(os.getenv('TWELVEDATA_TIMEOUT_SECONDS'), 10, field_name='TWELVEDATA_TIMEOUT_SECONDS', minimum=1),
             twelvedata_us_hk_enable=parse_env_bool(os.getenv('TWELVEDATA_US_HK_ENABLE'), True),
+            finnhub_api_key=os.getenv('FINNHUB_API_KEY') or None,
+            alphavantage_api_key=os.getenv('ALPHAVANTAGE_API_KEY') or None,
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
             longbridge_app_secret=os.getenv('LONGBRIDGE_APP_SECRET') or None,
             longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None,

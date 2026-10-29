@@ -1113,6 +1113,7 @@ class AnalysisCalibrationService:
             ).all()
 
         rows: List[Dict[str, Any]] = []
+        skipped_placeholder = 0
         for backtest_row, history_row in pairs:
             payload = self._parse_payload(getattr(history_row, "raw_result", None))
             context_payload = self._parse_payload(getattr(history_row, "context_snapshot", None))
@@ -1120,11 +1121,19 @@ class AnalysisCalibrationService:
             if signal not in {"buy", "hold", "sell"}:
                 continue
 
+            # 只吃真实 LLM 产出的记录。LLM 不可用时 analyze() 会落一条
+            # 「持有/震荡/50」的兜底结果，这类样本没有任何信息量，
+            # 混进训练集会让模型学到占位值到涨跌的伪映射。
+            model_used = self._extract_model_used(payload)
+            if not model_used:
+                skipped_placeholder += 1
+                continue
+
             rows.append(
                 {
                     "code": history_row.code,
                     "market": self._extract_market(history_row.code, payload, context_payload),
-                    "model_used": self._extract_model_used(payload),
+                    "model_used": model_used,
                     "signal": signal,
                     "sentiment_score": payload.get("sentiment_score", getattr(history_row, "sentiment_score", 50)),
                     "trend_prediction": payload.get("trend_prediction", getattr(history_row, "trend_prediction", "")),
@@ -1134,6 +1143,12 @@ class AnalysisCalibrationService:
                     "evaluated_at_ts": backtest_row.evaluated_at.timestamp() if backtest_row.evaluated_at else 0.0,
                     "context_payload": context_payload,
                 }
+            )
+
+        if skipped_placeholder:
+            logger.info(
+                "[LearningLoop] 跳过 %s 条无 model_used 的占位样本（LLM 未参与的兜底结果）",
+                skipped_placeholder,
             )
         return rows
 

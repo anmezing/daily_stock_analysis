@@ -283,6 +283,32 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["code"], current_code)
 
+    def test_learning_rows_exclude_placeholder_analyses(self) -> None:
+        """LLM 未参与时落库的「持有/震荡/50」占位结果不能进入学习集。"""
+        self._insert_learning_record(
+            query_id="q-real",
+            code="AAPL",
+            signal="buy",
+            direction_correct=True,
+            simulated_return_pct=3.0,
+            stock_return_pct=3.0,
+            model_used="gemini/gemini-2.5-flash",
+        )
+        self._insert_learning_record(
+            query_id="q-stub",
+            code="TSLA",
+            signal="hold",
+            direction_correct=True,
+            simulated_return_pct=0.0,
+            stock_return_pct=0.0,
+            model_used="",
+        )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = service._load_learning_rows()
+
+        self.assertEqual([row["code"] for row in rows], ["AAPL"])
+
     def test_maybe_refresh_backtests_respects_cooldown(self) -> None:
         service = AnalysisCalibrationService(db_manager=self.db, config=self.config, time_fn=lambda: 1000.0)
         with patch("src.services.analysis_calibration_service.BacktestService.run_backtest", return_value={"processed": 0, "saved": 0, "completed": 0, "insufficient": 0, "errors": 0}) as mock_run:
@@ -614,3 +640,29 @@ class PipelineLearningLoopTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_learning_rows_exclude_placeholder_analyses(self) -> None:
+        """LLM 未参与时落库的「持有/震荡/50」占位结果不能进入学习集。"""
+        self._insert_learning_record(
+            query_id="q-real",
+            code="AAPL",
+            signal="buy",
+            direction_correct=True,
+            simulated_return_pct=3.0,
+            stock_return_pct=3.0,
+            model_used="gemini/gemini-2.5-flash",
+        )
+        self._insert_learning_record(
+            query_id="q-stub",
+            code="TSLA",
+            signal="hold",
+            direction_correct=True,
+            simulated_return_pct=0.0,
+            stock_return_pct=0.0,
+            model_used="",
+        )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = service._load_learning_rows()
+
+        self.assertEqual([row["code"] for row in rows], ["AAPL"])

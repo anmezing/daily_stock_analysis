@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 个股分析 Prompt 拆分为「公共约束 + 市场片段」：按标的市场只注入对应规则（A股/港股/美股），减少无关市场的规则干扰；新增"只用给定数据、缺失填 null、禁止编造"硬约束，统一各市场乖离率区间，并把筹码数据改为可选加分项（此前美港股无筹码数据导致评分无法达到"强烈买入"）。
 - [改进] 美股实时行情链路改为 Finnhub 优先（免费档提供实时报价），TwelveData 退居次位；日线链路顺序不变。
 - [改进] 美股/港股实时行情补充换手率：用成交量 ÷ 流通股本（缺失时退回总股本）计算，此前 yfinance/Finnhub/TwelveData 均不直接提供该字段。
+- [修复] 学习校准不再使用 LLM 未参与时落库的占位结果（`model_used` 为空、固定为 `持有/震荡/50`）；生产库中该类记录占比达 70%，导致模型长期在空壳数据上训练。被跳过的样本数会写入日志。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

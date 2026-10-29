@@ -695,10 +695,19 @@ class Config:
     # === 回测配置 ===
     backtest_enabled: bool = True
     backtest_eval_window_days: int = 10
+    backtest_extra_windows: str = "1,5,20"
     backtest_min_age_days: int = 14
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
     backtest_entry_mode: str = "next_open"
+    # 交易成本：佣金 + 单边滑点（bps，1bp = 0.01%）。港股实际还要加约 10bp 印花税/征费
+    backtest_commission_bps: float = 0.0
+    backtest_slippage_bps: float = 5.0
+    # 基准指数（同窗口对比，回答"跑赢大盘了吗"）
+    backtest_benchmark_enabled: bool = True
+    backtest_benchmark_cn: str = "510300.SS"
+    backtest_benchmark_hk: str = "2800.HK"
+    backtest_benchmark_us: str = "SPY"
     analysis_learning_refresh_interval_minutes: int = 60
     analysis_learning_min_samples: int = 20
     analysis_learning_history_limit: int = 800
@@ -1297,10 +1306,17 @@ class Config:
             longbridge_access_token=os.getenv('LONGBRIDGE_ACCESS_TOKEN') or None,
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS', '10')),
+            backtest_extra_windows=os.getenv('BACKTEST_EXTRA_WINDOWS', '1,5,20').strip(),
             backtest_min_age_days=int(os.getenv('BACKTEST_MIN_AGE_DAYS', '14')),
             backtest_engine_version=os.getenv('BACKTEST_ENGINE_VERSION', 'v1'),
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
             backtest_entry_mode=os.getenv('BACKTEST_ENTRY_MODE', 'next_open').strip().lower() or 'next_open',
+            backtest_commission_bps=max(0.0, float(os.getenv('BACKTEST_COMMISSION_BPS', '0'))),
+            backtest_slippage_bps=max(0.0, float(os.getenv('BACKTEST_SLIPPAGE_BPS', '5'))),
+            backtest_benchmark_enabled=os.getenv('BACKTEST_BENCHMARK_ENABLED', 'true').lower() == 'true',
+            backtest_benchmark_cn=os.getenv('BACKTEST_BENCHMARK_CN', '510300.SS').strip() or '510300.SS',
+            backtest_benchmark_hk=os.getenv('BACKTEST_BENCHMARK_HK', '2800.HK').strip() or '2800.HK',
+            backtest_benchmark_us=os.getenv('BACKTEST_BENCHMARK_US', 'SPY').strip() or 'SPY',
             analysis_learning_refresh_interval_minutes=max(1, int(os.getenv('ANALYSIS_LEARNING_REFRESH_INTERVAL_MINUTES', '60'))),
             analysis_learning_min_samples=max(3, int(os.getenv('ANALYSIS_LEARNING_MIN_SAMPLES', '20'))),
             analysis_learning_history_limit=max(50, int(os.getenv('ANALYSIS_LEARNING_HISTORY_LIMIT', '800'))),

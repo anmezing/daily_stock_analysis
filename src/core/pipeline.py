@@ -37,6 +37,7 @@ from src.data.stock_mapping import STOCK_NAME_MAP
 from src.notification import NotificationService, NotificationChannel
 from src.search_service import SearchService
 from src.services.analysis_calibration_service import AnalysisCalibrationService
+from src.services.benchmark_service import BenchmarkService
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.trading_calendar import get_market_for_stock, get_market_now, get_market_today, is_market_open, get_market_session, get_session_label
@@ -89,6 +90,7 @@ class StockAnalysisPipeline:
         self.analyzer = GeminiAnalyzer()
         self.notifier = NotificationService(source_message=source_message)
         self.calibration_service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        self.benchmark_service = BenchmarkService(self.db, config=self.config)
         self._learning_refresh_lock = Lock()
         self._single_stock_notify_lock = Lock()
         
@@ -482,6 +484,13 @@ class StockAnalysisPipeline:
 
             # Step 5: 获取分析上下文（技术面数据 + 历史K线）
             analysis_date = get_market_today(get_market_for_stock(code))
+            market_regime: Dict[str, Any] = {}
+            try:
+                market_regime = self.benchmark_service.snapshot(
+                    get_market_for_stock(code) or "cn", analysis_date
+                )
+            except Exception as exc:
+                logger.debug("[%s] 基准状态获取失败: %s", code, exc)
             history_days = getattr(self.config, 'analysis_history_days', 60)
             context = self.db.get_analysis_context(code, target_date=analysis_date, history_days=history_days)
 
@@ -506,6 +515,7 @@ class StockAnalysisPipeline:
                 stock_name,  # 传入股票名称
                 fundamental_context,
                 market_context=market_intel_summary,
+                market_regime=market_regime,
             )
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
@@ -572,6 +582,7 @@ class StockAnalysisPipeline:
         stock_name: str = "",
         fundamental_context: Optional[Dict[str, Any]] = None,
         market_context: Optional[Dict[str, Any]] = None,
+        market_regime: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -750,6 +761,9 @@ class StockAnalysisPipeline:
             else fallback_market_context
         )
         enhanced["market"] = enhanced["market_context"].get("market", market_tag)
+
+        # 基准指数状态（SPY/2800.HK）：风险偏好与中期趋势
+        enhanced["market_regime"] = market_regime if isinstance(market_regime, dict) else {}
 
         # Improvement 3+4: inject market session label so LLM knows data timeliness
         enhanced["session_label"] = get_session_label(market_tag)

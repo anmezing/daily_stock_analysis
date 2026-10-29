@@ -15,7 +15,7 @@ import logging
 import math
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
 try:
@@ -859,6 +859,9 @@ class AnalysisResult:
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
     calibration_info: Optional[Dict[str, Any]] = None  # 回测校准/进化信息（如有）
     strategy_id: Optional[str] = None  # 主策略 ID（来自多策略编排器）
+    # 数值一致性校验：模型是否引用了输入里不存在的价格/均线
+    numeric_consistency: bool = True
+    numeric_issues: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -899,6 +902,8 @@ class AnalysisResult:
             'calibration_info': self.calibration_info,
             'query_id': self.query_id,
             'strategy_id': self.strategy_id,
+            'numeric_consistency': self.numeric_consistency,
+            'numeric_issues': self.numeric_issues,
         }
 
     def get_core_conclusion(self) -> str:
@@ -942,6 +947,64 @@ class AnalysisResult:
         """返回置信度星级"""
         star_map = {'高': '⭐⭐⭐', '中': '⭐⭐', '低': '⭐'}
         return star_map.get(self.confidence_level, '⭐⭐')
+
+
+def validate_result_numbers(result: AnalysisResult, context: Dict[str, Any]) -> List[str]:
+    """Check that the model did not invent prices or moving averages.
+
+    Only structural mismatches (a field that should mirror the input but is
+    off by >1%) invalidate a result. Invalid stop/target ordering is recorded
+    but does not by itself mark the analysis unusable.
+    """
+    import re
+
+    def _to_number(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if not isinstance(value, str):
+            return None
+        text = re.sub(r"MA\d+", " ", value.replace(",", ""), flags=re.I)
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        return float(match.group()) if match else None
+
+    dashboard = result.dashboard if isinstance(result.dashboard, dict) else {}
+    perspective = dashboard.get("data_perspective")
+    position = perspective.get("price_position") if isinstance(perspective, dict) else {}
+    position = position if isinstance(position, dict) else {}
+
+    today = context.get("today") if isinstance(context.get("today"), dict) else {}
+    trend = context.get("trend_analysis") if isinstance(context.get("trend_analysis"), dict) else {}
+    realtime = context.get("realtime") if isinstance(context.get("realtime"), dict) else {}
+
+    expected = {
+        "current_price": today.get("close") or realtime.get("price"),
+        "ma5": trend.get("ma5") or today.get("ma5"),
+        "ma10": trend.get("ma10") or today.get("ma10"),
+        "ma20": trend.get("ma20") or today.get("ma20"),
+    }
+
+    issues: List[str] = []
+    reference_price: Optional[float] = None
+    for key, expected_value in expected.items():
+        expected_number = _to_number(expected_value)
+        if key == "current_price":
+            reference_price = expected_number
+        reported = _to_number(position.get(key))
+        if reported is None or expected_number is None or expected_number <= 0:
+            continue
+        if abs(reported - expected_number) / expected_number > 0.01:
+            issues.append(f"price_mismatch:{key}")
+
+    battle = dashboard.get("battle_plan")
+    sniper = battle.get("sniper_points") if isinstance(battle, dict) else {}
+    sniper = sniper if isinstance(sniper, dict) else {}
+    stop_loss = _to_number(sniper.get("stop_loss"))
+    take_profit = _to_number(sniper.get("take_profit"))
+    if reference_price and stop_loss and take_profit and result.decision_type == "buy":
+        if not (stop_loss < reference_price < take_profit):
+            issues.append("target_order_invalid")
+
+    return issues
 
 
 def normalize_analysis_result_signals(result: AnalysisResult) -> AnalysisResult:
@@ -1850,6 +1913,18 @@ class GeminiAnalyzer:
                 result.search_performed = bool(news_context)
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
+                numeric_issues = validate_result_numbers(result, context)
+                result.numeric_issues = numeric_issues
+                result.numeric_consistency = not any(
+                    issue.startswith("price_mismatch") for issue in numeric_issues
+                )
+                if numeric_issues:
+                    logger.warning(
+                        "[数值校验] %s(%s) 发现异常: %s",
+                        name,
+                        code,
+                        numeric_issues,
+                    )
 
                 truncated = bool(response_meta.get("truncated"))
                 if truncated:
@@ -2003,6 +2078,7 @@ class GeminiAnalyzer:
             
         today = context.get('today', {})
         market_context_block = self._build_market_context_block(context)
+        regime_block = self._build_market_regime_block(context)
         
         # Determine currency label based on market
         market = self._resolve_market_context(context).get("market", "cn")
@@ -2027,6 +2103,8 @@ class GeminiAnalyzer:
 ---
 
 {market_context_block}
+
+{regime_block}
 
 ---
 
@@ -2383,6 +2461,37 @@ class GeminiAnalyzer:
             "market": market,
             "market_label": self._market_label(market),
         }
+
+    def _build_market_regime_block(self, context: Dict[str, Any]) -> str:
+        """Benchmark regime block (index trend / volatility)."""
+        regime = context.get("market_regime")
+        if not isinstance(regime, dict) or regime.get("close") is None:
+            return ""
+        code = regime.get("code") or "基准"
+        ma200 = regime.get("ma200")
+        above = regime.get("above_ma200")
+        volatility = regime.get("volatility_20d_pct")
+        recent = regime.get("recent_volatility_pct")
+        lines = [
+            "## 市场状态（基准指数）",
+            f"- 基准：{code}",
+            f"- 收盘：{self._display_optional(regime.get('close'))}",
+            f"- 200日均线：{self._display_optional(ma200)}",
+            f"- 位置：{'200日线上方' if above else '200日线下方'}",
+            f"- 20日波动率：{self._format_percent(volatility)}",
+        ]
+        if recent is not None:
+            lines.append(f"- 近10日波动率：{self._format_percent(recent)}")
+        if above:
+            lines.append(
+                "- 结论：风险偏好正常（risk-on）。仍按个股结构判断，不因大盘强势放宽追高阈值。"
+            )
+        else:
+            lines.append(
+                "- 结论：风险偏好偏弱（risk-off）。买入信号应更保守：优先回踩确认、"
+                "降低仓位，或等待基准回到均线上方。"
+            )
+        return "\n".join(lines)
 
     def _build_market_context_block(self, context: Dict[str, Any]) -> str:
         """Build a compact market-specific guidance block for the analysis prompt."""

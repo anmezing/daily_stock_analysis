@@ -161,3 +161,92 @@ def test_empty_fundamental_context_adds_no_noise():
     prompt = _analyzer()._format_prompt(_context(), "Apple Inc.")
 
     assert "基本面数据（数据源聚合）" not in prompt
+
+
+def test_numeric_validator_flags_invented_price():
+    from src.analyzer import AnalysisResult, validate_result_numbers
+
+    result = AnalysisResult(
+        code="AAPL",
+        name="Apple Inc.",
+        sentiment_score=70,
+        trend_prediction="看多",
+        operation_advice="买入",
+        decision_type="buy",
+        dashboard={
+            "data_perspective": {
+                "price_position": {"current_price": 999.0, "ma5": 178.0}
+            }
+        },
+    )
+
+    issues = validate_result_numbers(result, _context(trend_analysis={"ma5": 178.0}))
+
+    assert any(issue.startswith("price_mismatch:current_price") for issue in issues)
+
+
+def test_numeric_validator_accepts_matching_numbers():
+    from src.analyzer import AnalysisResult, validate_result_numbers
+
+    result = AnalysisResult(
+        code="AAPL",
+        name="Apple Inc.",
+        sentiment_score=70,
+        trend_prediction="看多",
+        operation_advice="买入",
+        decision_type="buy",
+        dashboard={
+            "data_perspective": {
+                "price_position": {"current_price": 180.0, "ma5": 178.0}
+            }
+        },
+    )
+
+    issues = validate_result_numbers(result, _context(trend_analysis={"ma5": 178.0}))
+
+    assert issues == []
+
+
+def test_numeric_validator_flags_impossible_target_order():
+    from src.analyzer import AnalysisResult, validate_result_numbers
+
+    result = AnalysisResult(
+        code="AAPL",
+        name="Apple Inc.",
+        sentiment_score=70,
+        trend_prediction="看多",
+        operation_advice="买入",
+        decision_type="buy",
+        dashboard={
+            "data_perspective": {
+                "price_position": {"current_price": 180.0, "ma5": 178.0}
+            },
+            "battle_plan": {
+                "sniper_points": {"stop_loss": "190", "take_profit": "200"}
+            },
+        },
+    )
+
+    issues = validate_result_numbers(result, _context(trend_analysis={"ma5": 178.0}))
+
+    assert "target_order_invalid" in issues
+
+
+def test_regime_block_warns_in_risk_off():
+    prompt = _analyzer()._format_prompt(
+        _context(
+            market_regime={
+                "code": "SPY",
+                "close": 480.0,
+                "ma200": 500.0,
+                "above_ma200": False,
+                "volatility_20d_pct": 1.8,
+                "recent_volatility_pct": 2.2,
+            }
+        ),
+        "Apple Inc.",
+    )
+
+    assert "市场状态（基准指数）" in prompt
+    assert "risk-off" in prompt
+    assert "200日线下方" in prompt

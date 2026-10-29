@@ -412,8 +412,8 @@ const SettingsPage: React.FC = () => {
                   items={rawActiveItems}
                   configVersion={configVersion}
                   maskToken={maskToken}
-                  onSaved={async (updatedItems) => {
-                    await refreshAfterExternalSave(updatedItems.map((item) => item.key));
+                  onSaved={async () => {
+                    await refreshAfterExternalSave();
                   }}
                   disabled={isSaving || isLoading}
                 />

@@ -6,6 +6,8 @@ import type {
   BacktestResultsResponse,
   BacktestResultItem,
   PerformanceMetrics,
+  PortfolioBacktestRequest,
+  PortfolioBacktestResponse,
 } from '../types/backtest';
 
 // ============ API ============
@@ -77,6 +79,25 @@ export const backtestApi = {
       }
       throw err;
     }
+  },
+
+  /**
+   * Run a portfolio-level backtest (cross-sectional ranking + capital allocation)
+   */
+  runPortfolio: async (params: PortfolioBacktestRequest): Promise<PortfolioBacktestResponse> => {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/backtest/portfolio',
+      {
+        start_date: params.startDate,
+        end_date: params.endDate,
+        initial_capital: params.initialCapital ?? 100000,
+        max_positions: params.maxPositions ?? 5,
+        holding_days: params.holdingDays ?? 10,
+        min_score: params.minScore ?? 0,
+        benchmark_market: params.benchmarkMarket || undefined,
+      },
+    );
+    return toCamelCase<PortfolioBacktestResponse>(response.data);
   },
 
   /**

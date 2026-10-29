@@ -2,7 +2,8 @@ import React from 'react';
 import { cn } from '../../utils/cn';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'gradient' | 'danger';
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'gradient' | 'danger'
+    | 'home-action-ai' | 'home-action-report' | 'settings-primary' | 'settings-secondary';
   size?: 'sm' | 'md' | 'lg' | 'xl';
   isLoading?: boolean;
   /** Custom loading text. */
@@ -24,6 +25,10 @@ const BUTTON_VARIANT_STYLES = {
   ghost: 'border border-transparent bg-transparent text-secondary-text hover:bg-white/5 hover:text-foreground',
   gradient: 'border border-cyan/20 bg-gradient-to-r from-cyan to-purple text-white shadow-lg shadow-cyan/20 hover:brightness-105',
   danger: 'border border-danger/40 bg-danger text-white shadow-lg shadow-danger/20 hover:brightness-105',
+  'home-action-ai': 'border border-cyan/30 bg-primary-gradient text-slate-950 shadow-lg shadow-cyan/20 hover:brightness-105',
+  'home-action-report': 'border border-white/10 bg-card text-foreground shadow-soft-card hover:bg-hover',
+  'settings-primary': 'border border-cyan/30 bg-primary-gradient text-slate-950 shadow-lg shadow-cyan/20 hover:brightness-105',
+  'settings-secondary': 'border border-white/10 bg-card text-foreground shadow-soft-card hover:bg-hover',
 } as const;
 
 /**

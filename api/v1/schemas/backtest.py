@@ -22,6 +22,25 @@ class BacktestRunResponse(BaseModel):
     completed: int = Field(..., description="完成回测数")
     insufficient: int = Field(..., description="数据不足数")
     errors: int = Field(..., description="错误数")
+    data_quality: int = Field(0, description="疑似拆股/并股而跳过的窗口数")
+    windows: List[int] = Field(default_factory=list, description="本次评估的窗口（交易日）")
+    per_window: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class PortfolioBacktestRequest(BaseModel):
+    start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
+    end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
+    initial_capital: float = Field(100000.0, gt=0)
+    max_positions: int = Field(5, ge=1, le=50)
+    holding_days: int = Field(10, ge=1, le=120)
+    min_score: int = Field(0, ge=0, le=100)
+    benchmark_market: Optional[str] = Field(None, description="cn/hk/us，默认按持仓推断")
+
+
+class PortfolioBacktestResponse(BaseModel):
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+    equity_curve: List[Dict[str, Any]] = Field(default_factory=list)
+    trades: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class BacktestResultItem(BaseModel):
@@ -61,6 +80,13 @@ class BacktestResultItem(BaseModel):
     simulated_exit_price: Optional[float] = None
     simulated_exit_reason: Optional[str] = None
     simulated_return_pct: Optional[float] = None
+    simulated_return_pct_gross: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
+    days_to_mfe: Optional[int] = None
+    days_to_mae: Optional[int] = None
+    benchmark_return_pct: Optional[float] = None
+    excess_return_pct: Optional[float] = None
     strategy_id: Optional[str] = None
 
 
@@ -110,6 +136,20 @@ class PerformanceMetrics(BaseModel):
     )
     avg_simulated_return_pct: Optional[float] = Field(
         None, description="平均模拟执行收益率：仅统计 long 仓位，含止盈止损与缺口成交"
+    )
+    avg_simulated_return_pct_gross: Optional[float] = Field(
+        None, description="扣佣金/滑点前的平均模拟收益率"
+    )
+    avg_mfe_pct: Optional[float] = Field(None, description="窗口内平均最大浮盈")
+    avg_mae_pct: Optional[float] = Field(None, description="窗口内平均最大浮亏（负数）")
+    avg_benchmark_return_pct: Optional[float] = Field(
+        None, description="同窗口基准（SPY/2800.HK/沪深300）收益"
+    )
+    avg_excess_return_pct: Optional[float] = Field(
+        None, description="平均超额收益 = 个股收益 − 基准收益"
+    )
+    excess_win_rate_pct: Optional[float] = Field(
+        None, description="跑赢基准的 long 交易占比"
     )
 
     stop_loss_trigger_rate: Optional[float] = None

@@ -207,8 +207,18 @@ export function useSystemConfig() {
     }
   }, [applyServerPayload]);
 
-  const resetDraft = useCallback(() => {
-    const next: Record<string, string> = {};
+  const refreshAfterExternalSave = useCallback(async (_keys?: string[]): Promise<void> => {
+    void _keys;
+    try {
+      const refreshed = await systemConfigApi.getConfig(true);
+      applyServerPayload(refreshed.items, refreshed.configVersion, refreshed.maskToken);
+      setToast(null);
+    } catch (error: unknown) {
+      setLoadError(getParsedApiError(error));
+    }
+  }, [applyServerPayload]);
+
+  const resetDraft = useCallback(() => {    const next: Record<string, string> = {};
     for (const item of serverItems) {
       next[item.key] = item.value;
     }
@@ -361,5 +371,6 @@ export function useSystemConfig() {
     save,
     resetDraft,
     setDraftValue,
+    refreshAfterExternalSave,
   };
 }

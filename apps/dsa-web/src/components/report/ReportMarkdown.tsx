@@ -10,6 +10,7 @@ interface ReportMarkdownProps {
   stockName: string;
   stockCode: string;
   onClose: () => void;
+  reportLanguage?: string;
 }
 
 /**

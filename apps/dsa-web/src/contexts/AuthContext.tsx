@@ -8,6 +8,7 @@ type AuthContextValue = {
   loggedIn: boolean;
   passwordSet: boolean;
   passwordChangeable: boolean;
+  setupState: 'no_password' | 'password_set';
   isLoading: boolean;
   loadError: ParsedApiError | null;
   login: (password: string, passwordConfirm?: string) => Promise<{ success: boolean; error?: ParsedApiError }>;
@@ -115,6 +116,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loggedIn,
         passwordSet,
         passwordChangeable,
+        setupState: passwordSet ? 'password_set' : 'no_password',
         isLoading,
         loadError,
         login,

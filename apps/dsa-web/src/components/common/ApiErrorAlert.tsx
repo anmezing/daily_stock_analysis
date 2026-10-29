@@ -6,6 +6,7 @@ interface ApiErrorAlertProps {
   className?: string;
   actionLabel?: string;
   onAction?: () => void;
+  onDismiss?: () => void;
 }
 
 export const ApiErrorAlert: React.FC<ApiErrorAlertProps> = ({
@@ -13,14 +14,25 @@ export const ApiErrorAlert: React.FC<ApiErrorAlertProps> = ({
   className = '',
   actionLabel,
   onAction,
+  onDismiss,
 }) => {
   const showDetails = error.rawMessage.trim() && error.rawMessage.trim() !== error.message.trim();
 
   return (
     <div
-      className={`rounded-xl border border-red-500/35 bg-red-500/10 px-4 py-3 text-red-200 ${className}`}
+      className={`relative rounded-xl border border-red-500/35 bg-red-500/10 px-4 py-3 text-red-200 ${className}`}
       role="alert"
     >
+      {onDismiss ? (
+        <button
+          type="button"
+          aria-label="Dismiss"
+          onClick={onDismiss}
+          className="absolute right-2 top-2 rounded px-1.5 text-sm text-red-200/70 hover:bg-red-500/10 hover:text-red-100"
+        >
+          ×
+        </button>
+      ) : null}
       <p className="text-sm font-semibold">{error.title}</p>
       <p className="mt-1 text-xs opacity-90">{error.message}</p>
       {showDetails ? (

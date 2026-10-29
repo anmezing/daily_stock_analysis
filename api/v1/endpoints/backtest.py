@@ -15,9 +15,15 @@ from api.v1.schemas.backtest import (
     BacktestResultItem,
     BacktestResultsResponse,
     PerformanceMetrics,
+    PortfolioBacktestRequest,
+    PortfolioBacktestResponse,
 )
 from api.v1.schemas.common import ErrorResponse
 from src.services.backtest_service import BacktestService
+from src.services.portfolio_backtest_service import (
+    PortfolioBacktestConfig,
+    PortfolioBacktestService,
+)
 from src.storage import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -54,6 +60,62 @@ def run_backtest(
         raise HTTPException(
             status_code=500,
             detail={"error": "internal_error", "message": f"回测执行失败: {str(exc)}"},
+        )
+
+
+@router.post(
+    "/portfolio",
+    response_model=PortfolioBacktestResponse,
+    responses={
+        200: {"description": "组合回测完成"},
+        500: {"description": "服务器错误", "model": ErrorResponse},
+    },
+    summary="组合层回测",
+    description="按信号日横截面排序、限制持仓数量并模拟资金曲线，输出收益/回撤/Sharpe/基准对比",
+)
+def run_portfolio_backtest(
+    request: PortfolioBacktestRequest,
+    db_manager: DatabaseManager = Depends(get_database_manager),
+) -> PortfolioBacktestResponse:
+    from datetime import date as _date
+
+    try:
+        start = _date.fromisoformat(request.start_date)
+        end = _date.fromisoformat(request.end_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_date", "message": "日期格式应为 YYYY-MM-DD"},
+        )
+    if end <= start:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_range", "message": "结束日期必须晚于开始日期"},
+        )
+
+    try:
+        service = PortfolioBacktestService(db_manager)
+        result = service.run(
+            PortfolioBacktestConfig(
+                start_date=start,
+                end_date=end,
+                initial_capital=request.initial_capital,
+                max_positions=request.max_positions,
+                holding_days=request.holding_days,
+                min_score=request.min_score,
+                benchmark_market=request.benchmark_market,
+            )
+        )
+        return PortfolioBacktestResponse(
+            metrics=result.metrics,
+            equity_curve=result.equity_curve,
+            trades=result.trades,
+        )
+    except Exception as exc:
+        logger.error(f"组合回测失败: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "message": f"组合回测失败: {str(exc)}"},
         )
 
 

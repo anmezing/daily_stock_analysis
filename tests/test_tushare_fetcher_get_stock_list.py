@@ -42,12 +42,6 @@ if "fake_useragent" not in sys.modules:
 from data_provider.base import DataFetchError, RateLimitError
 from data_provider.tushare_fetcher import TushareFetcher
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
-except ImportError:
-    pass
-
 
 class TestTushareFetcherGetStockList(unittest.TestCase):
     @staticmethod

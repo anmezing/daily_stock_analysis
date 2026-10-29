@@ -35,12 +35,44 @@ class TestCheckContentIntegrity(unittest.TestCase):
             dashboard={
                 "core_conclusion": {"one_sentence": "持有观望"},
                 "intelligence": {"risk_alerts": []},
-                "battle_plan": {"sniper_points": {"stop_loss": "110元"}},
+                "battle_plan": {
+                    "sniper_points": {
+                        "stop_loss": "110元",
+                        "ideal_buy": "118元",
+                        "secondary_buy": "121元",
+                    }
+                },
             },
         )
         ok, missing = check_content_integrity(result)
         self.assertTrue(ok)
         self.assertEqual(missing, [])
+
+    def test_fail_when_ideal_buy_equals_secondary_buy(self) -> None:
+        """Integrity fails when the two buy points are identical (no second entry)."""
+        result = AnalysisResult(
+            code="600519",
+            name="贵州茅台",
+            trend_prediction="看多",
+            sentiment_score=70,
+            operation_advice="买入",
+            analysis_summary="稳健",
+            decision_type="buy",
+            dashboard={
+                "core_conclusion": {"one_sentence": "可分批买入"},
+                "intelligence": {"risk_alerts": []},
+                "battle_plan": {
+                    "sniper_points": {
+                        "stop_loss": "110元",
+                        "ideal_buy": "118元",
+                        "secondary_buy": "118元",
+                    }
+                },
+            },
+        )
+        ok, missing = check_content_integrity(result)
+        self.assertFalse(ok)
+        self.assertIn("dashboard.battle_plan.sniper_points.secondary_buy", missing)
 
     def test_fail_when_analysis_summary_empty(self) -> None:
         """Integrity fails when analysis_summary is empty."""

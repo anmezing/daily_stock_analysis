@@ -18,7 +18,6 @@ for _mod in ("litellm", "google.generativeai", "google.genai", "anthropic"):
         sys.modules[_mod] = MagicMock()
 
 import pytest
-from unittest.mock import PropertyMock
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +92,7 @@ class TestAnalyzerGenerateText:
              patch("src.analyzer.extra_litellm_params", return_value={}), \
              patch("src.analyzer.get_configured_llm_models", return_value=[]), \
              patch("src.analyzer.get_thinking_extra_body", return_value=None), \
+             patch("src.analyzer.get_llm_rate_limiter"), \
              patch("src.analyzer.time.sleep") as mock_sleep, \
              patch(
                  "src.analyzer.litellm.completion",
@@ -139,6 +139,7 @@ class TestAnalyzerGenerateText:
              patch("src.analyzer.extra_litellm_params", return_value={}), \
              patch("src.analyzer.get_configured_llm_models", return_value=[]), \
              patch("src.analyzer.get_thinking_extra_body", return_value=None), \
+             patch("src.analyzer.get_llm_rate_limiter"), \
              patch("src.analyzer.time.sleep") as mock_sleep, \
              patch("src.analyzer.litellm.completion", side_effect=_fake_completion):
             text, model_used, usage = analyzer._call_litellm(

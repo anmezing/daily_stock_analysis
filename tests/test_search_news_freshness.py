@@ -38,6 +38,23 @@ def _response(results) -> SearchResponse:
     )
 
 
+def _sequence(*responses):
+    """Return a side_effect that drains queued responses, then yields empties.
+
+    ``search_comprehensive_intel`` can issue extra deferred fallback searches
+    (e.g. the A-share ``cn_official`` dimension), so a fixed list would raise
+    StopIteration on the extra call.
+    """
+    queue = list(responses)
+
+    def _next(*_args, **_kwargs):
+        if queue:
+            return queue.pop(0)
+        return _response([])
+
+    return _next
+
+
 class SearchNewsFreshnessTestCase(unittest.TestCase):
     """Tests for strategy window and strict published_date filtering."""
 
@@ -165,10 +182,10 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_max_age_days=3,
             news_strategy_profile="medium",  # min(7,3)=3
         )
-        mock_search.side_effect = [
+        mock_search.side_effect = _sequence(
             _response([_result("old", old), _result("fresh", fresh)]),
             _response([_result("analysis_unknown", None), _result("analysis_dated", analysis_text)]),
-        ]
+        )
         with patch("src.search_service.time.sleep"):
             intel = service.search_comprehensive_intel(
                 stock_code="600519",
@@ -178,9 +195,13 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
 
         self.assertGreaterEqual(mock_search.call_count, 1)
         for call in mock_search.call_args_list:
-            kwargs = call[1]
-            self.assertEqual(kwargs["days"], 3)
-            self.assertEqual(kwargs["max_results"], 6)  # target 3 -> overfetch 6
+            # 所有维度查询都必须落在 3 天窗口内
+            self.assertEqual(call[1]["days"], 3)
+        # 维度查询按 target 3 过采样到 6；延迟回退走 max_results=3，不参与该断言
+        dimension_calls = [c for c in mock_search.call_args_list if c[1].get("max_results") == 6]
+        self.assertTrue(dimension_calls, "expected at least one dimension search with overfetch")
+        for call in dimension_calls:
+            self.assertEqual(call[1]["days"], 3)
 
         self.assertEqual([item.title for item in intel["latest_news"].results], ["fresh"])
         self.assertEqual(
@@ -200,11 +221,11 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_max_age_days=3,
             news_strategy_profile="short",
         )
-        mock_search.side_effect = [
+        mock_search.side_effect = _sequence(
             _response([_result("latest_news", fresh_text)]),
             _response([_result("market_analysis_unknown", None)]),
             _response([_result("risk_unknown", None)]),
-        ]
+        )
 
         with patch("src.search_service.time.sleep"):
             intel = service.search_comprehensive_intel(
@@ -229,11 +250,11 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
             news_max_age_days=3,
             news_strategy_profile="short",
         )
-        mock_search.side_effect = [
+        mock_search.side_effect = _sequence(
             _response([_result("latest_news", fresh_text)]),
             _response([_result("market_analysis_unknown", None)]),
             _response([_result("risk_unknown", None)]),
-        ]
+        )
 
         with patch("src.search_service.time.sleep"):
             intel = service.search_comprehensive_intel(

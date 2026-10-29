@@ -151,6 +151,27 @@ def _coerce_sentiment_score_value(value: Any, default: int = 50) -> int:
         return default
 
 
+_CONFIDENCE_LEVELS = {"高", "中", "低"}
+_CONFIDENCE_ALIASES = {
+    "high": "高",
+    "medium": "中",
+    "mid": "中",
+    "normal": "中",
+    "low": "低",
+}
+
+
+def _normalize_confidence_level(value: Any, *, has_conflict: bool = False) -> str:
+    """把模型返回的置信度收敛到 高/中/低，避免脏值直接进报告与统计。"""
+    text = str(value or "").strip()
+    if text not in _CONFIDENCE_LEVELS:
+        text = _CONFIDENCE_ALIASES.get(text.lower(), "中")
+    if has_conflict:
+        # 模型自己的字段互相打架、信号已被降级为观望，就不该再显示高置信度
+        return "低"
+    return text
+
+
 def _clamp_sentiment_score_to_signal(score: int, signal: str) -> int:
     return _clamp_sentiment_score_to_signal_with_bias(score, signal, "neutral")
 
@@ -234,7 +255,7 @@ def get_result_signal_level(result: "AnalysisResult") -> Tuple[str, str, str]:
     decision_signal = _canonical_decision_signal(getattr(result, "decision_type", ""))
     advice_tokens = _split_operation_advice_tokens(advice)
 
-    if advice in _SIGNAL_LEVEL_BY_ADVICE:
+    if isinstance(advice, str) and advice in _SIGNAL_LEVEL_BY_ADVICE:
         return _SIGNAL_LEVEL_BY_ADVICE[advice]
 
     if advice_tokens:
@@ -830,6 +851,9 @@ class AnalysisResult:
 
     # ========== 模型标记（Issue #528）==========
     model_used: Optional[str] = None  # 分析使用的 LLM 模型（完整名，如 gemini/gemini-2.0-flash）
+    # 结构化解析 / 纯文本降级 / 输出截断。降级和截断结果都不能和正常分析
+    # 一起进回测与学习。
+    parse_mode: str = "structured"
 
     # ========== 历史对比（Report Engine P0）==========
     query_id: Optional[str] = None  # 本次分析 query_id，用于历史对比时排除本次记录
@@ -871,6 +895,7 @@ class AnalysisResult:
             'current_price': self.current_price,
             'change_pct': self.change_pct,
             'model_used': self.model_used,
+            'parse_mode': self.parse_mode,
             'calibration_info': self.calibration_info,
             'query_id': self.query_id,
             'strategy_id': self.strategy_id,
@@ -1451,6 +1476,7 @@ class GeminiAnalyzer:
         *,
         model: str,
         progress_callback: Optional[Callable[[int], None]] = None,
+        response_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Consume a LiteLLM stream into a single text payload."""
         chunks: List[str] = []
@@ -1464,6 +1490,18 @@ class GeminiAnalyzer:
                 normalized_usage = self._normalize_usage(chunk_usage)
                 if normalized_usage:
                     usage = normalized_usage
+
+                # finish_reason="length" 表示输出被 max_tokens 截断，
+                # 后面的 JSON 解析再"修复"也不等于完整分析。
+                choices = chunk.get("choices") if isinstance(chunk, dict) else getattr(chunk, "choices", None)
+                if choices:
+                    finish_reason = (
+                        choices[0].get("finish_reason")
+                        if isinstance(choices[0], dict)
+                        else getattr(choices[0], "finish_reason", None)
+                    )
+                    if finish_reason == "length" and response_meta is not None:
+                        response_meta["truncated"] = True
 
                 delta_text = self._extract_stream_text(chunk)
                 if not delta_text:
@@ -1500,6 +1538,7 @@ class GeminiAnalyzer:
         stream: bool = False,
         stream_progress_callback: Optional[Callable[[int], None]] = None,
         system_prompt: Optional[str] = None,
+        response_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, str, Dict[str, Any]]:
         """Call LLM via litellm with fallback across configured models.
 
@@ -1572,6 +1611,7 @@ class GeminiAnalyzer:
                                 stream_response,
                                 model=model,
                                 progress_callback=stream_progress_callback,
+                                response_meta=response_meta,
                             )
                             return response_text, model, usage
                         except _LiteLLMStreamError as exc:
@@ -1606,6 +1646,9 @@ class GeminiAnalyzer:
 
                     if response and response.choices and response.choices[0].message.content:
                         usage = self._normalize_usage(getattr(response, "usage", None))
+                        finish_reason = getattr(response.choices[0], "finish_reason", None)
+                        if finish_reason == "length" and response_meta is not None:
+                            response_meta["truncated"] = True
                         return (response.choices[0].message.content, model, usage)
                     raise ValueError("LLM returned empty response")
 
@@ -1780,12 +1823,14 @@ class GeminiAnalyzer:
             while True:
                 start_time = time.time()
                 _emit_progress(68, f"{context.get('code', '')} 正在调用 LLM...")
+                response_meta: Dict[str, Any] = {}
                 response_text, model_used, llm_usage = self._call_litellm(
                     current_prompt,
                     generation_config,
                     stream=stream_progress_callback is not None,
                     stream_progress_callback=stream_progress_callback,
                     system_prompt=market_guide,
+                    response_meta=response_meta,
                 )
                 elapsed = time.time() - start_time
 
@@ -1806,29 +1851,45 @@ class GeminiAnalyzer:
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
 
+                truncated = bool(response_meta.get("truncated"))
+                if truncated:
+                    # 被 max_tokens 截断的输出即使被 json_repair "修好"，
+                    # 也可能是缺字段的残缺结果，必须标记为降级，不能当完整分析入库。
+                    result.parse_mode = "truncated"
+                    logger.warning(
+                        "[LLM截断] %s 输出达到 max_tokens=%s，已标记为降级结果",
+                        model_used,
+                        generation_config.get("max_output_tokens"),
+                    )
+
                 # 内容完整性校验（可选）
-                if not config.report_integrity_enabled:
+                if not config.report_integrity_enabled and not truncated:
                     break
                 pass_integrity, missing_fields = self._check_content_integrity(result)
-                if pass_integrity:
+                if pass_integrity and not truncated:
                     break
                 if retry_count < max_retries:
-                    current_prompt = self._build_integrity_retry_prompt(
-                        prompt,
-                        response_text,
-                        missing_fields,
-                    )
+                    if truncated and pass_integrity:
+                        current_prompt = self._build_truncation_retry_prompt(prompt)
+                    else:
+                        current_prompt = self._build_integrity_retry_prompt(
+                            prompt,
+                            response_text,
+                            missing_fields,
+                        )
                     retry_count += 1
                     logger.info(
-                        "[LLM完整性] 必填字段缺失 %s，第 %d 次补全重试",
+                        "[LLM完整性] 必填字段缺失 %s / 截断=%s，第 %d 次补全重试",
                         missing_fields,
+                        truncated,
                         retry_count,
                     )
                 else:
                     self._apply_placeholder_fill(result, missing_fields)
                     logger.warning(
-                        "[LLM完整性] 必填字段缺失 %s，已占位补全，不阻塞流程",
+                        "[LLM完整性] 必填字段缺失 %s / 截断=%s，已占位补全，不阻塞流程",
                         missing_fields,
+                        truncated,
                     )
                     break
 
@@ -1854,6 +1915,69 @@ class GeminiAnalyzer:
                 model_used=None,
             )
     
+    def _format_fundamental_block(self, context: Dict[str, Any]) -> str:
+        """把基本面聚合结果渲染成提示词表格。
+
+        此前 `fundamental_context` 只写进快照、从未进入提示词：提示词要求模型
+        做基本面分析，却不给营收增速、ROE、财报日期，模型只能写空话或编造。
+        """
+        fundamental = context.get('fundamental_context')
+        if not isinstance(fundamental, dict):
+            return ""
+
+        def _data(name: str) -> Dict[str, Any]:
+            block = fundamental.get(name)
+            if not isinstance(block, dict):
+                return {}
+            payload = block.get('data')
+            return payload if isinstance(payload, dict) else {}
+
+        growth = _data('growth')
+        earnings = _data('earnings')
+        institution = _data('institution')
+
+        rows: List[str] = []
+
+        def _add(label: str, value: Any, formatter) -> None:
+            if value is None or value == "":
+                return
+            try:
+                rendered = formatter(value)
+            except (TypeError, ValueError):
+                # 单个字段脏值不应打断整份提示词
+                return
+            rows.append(f"| {label} | {rendered} |")
+
+        _add('营收同比', growth.get('revenue_yoy'), self._format_signed_percent)
+        _add('净利润同比', growth.get('net_profit_yoy'), self._format_signed_percent)
+        _add('ROE', growth.get('roe'), self._format_percent)
+        _add('毛利率', growth.get('gross_margin'), self._format_percent)
+        _add('机构持股比例', institution.get('institutional_holding_pct'), self._format_percent)
+        _add('分析师覆盖数', institution.get('analyst_coverage_count'), lambda v: f"{float(v):.0f}")
+        _add('分析师目标均价', institution.get('target_mean_price'), self._format_price)
+        _add('分析师共识', institution.get('recommendation_key'), lambda v: str(v))
+        _add('近90天内部人申报(Form 4)', institution.get('insider_form4_count_90d'), lambda v: f"{int(v)} 笔")
+        _add('近180天举牌/持股披露', institution.get('ownership_disclosure_count_180d'), lambda v: f"{int(v)} 笔")
+        _add('最近财报', earnings.get('latest_filing_form'), lambda v: str(v))
+        _add('最近财报日期', earnings.get('latest_filing_date'), lambda v: str(v))
+        _add('下次财报日', earnings.get('earnings_date'), lambda v: str(v))
+        _add('除息日', earnings.get('ex_dividend_date'), lambda v: str(v))
+        if earnings.get('latest_filing_url'):
+            rows.append(f"| 最近财报原文 | {earnings['latest_filing_url']} |")
+
+        if not rows:
+            return ""
+
+        status = str(fundamental.get('status') or 'unknown')
+        return f"""
+### 基本面数据（数据源聚合）
+> 状态：{status}。下表只列出实际取到的字段；未列出的项目表示数据源没有返回，**不要据此推断或补全**。
+
+| 指标 | 数值 |
+|------|------|
+{chr(10).join(rows)}
+"""
+
     def _format_prompt(
         self, 
         context: Dict[str, Any], 
@@ -1883,6 +2007,12 @@ class GeminiAnalyzer:
         # Determine currency label based on market
         market = self._resolve_market_context(context).get("market", "cn")
         currency = {"cn": "元", "hk": "港元", "us": "美元"}.get(market, "元")
+
+        # 盘中/盘前注入的是最新成交价，不是收盘价。标错会直接改变"突破了没有"的判断。
+        quote_injected = bool(context.get('quote_injected'))
+        is_intraday = bool(context.get('is_intraday'))
+        price_label = "最新价（分析时点快照，非收盘价）" if quote_injected else "收盘价"
+        volume_label = "成交量（盘中累计，非全天）" if is_intraday else "成交量"
         
         # ========== 构建决策仪表盘格式的输入 ==========
         prompt = f"""# 决策仪表盘分析请求
@@ -1905,20 +2035,24 @@ class GeminiAnalyzer:
 ### 今日行情
 | 指标 | 数值 |
 |------|------|
-| 收盘价 | {self._format_price(today.get('close'))} {currency} |
+| **数据日期** | **{self._display_optional(today.get('date'), '未知')}**（若与分析日期不同，说明当日无交易数据，按最新可用交易日分析） |
+| {price_label} | {self._format_price(today.get('close'))} {currency} |
 | 开盘价 | {self._format_price(today.get('open'))} {currency} |
 | 最高价 | {self._format_price(today.get('high'))} {currency} |
 | 最低价 | {self._format_price(today.get('low'))} {currency} |
 | 涨跌幅 | {self._format_percent(today.get('pct_chg'))} |
-| 成交量 | {self._format_volume(today.get('volume'), market)} |
+| {volume_label} | {self._format_volume(today.get('volume'), market)} |
 | 成交额 | {self._format_amount(today.get('amount'), currency, market)} |
 
 ### 均线系统（关键判断指标）
 | 均线 | 数值 | 说明 |
 |------|------|------|
-| MA5 | {self._format_price(today.get('ma5'))} | 短期趋势线 |
-| MA10 | {self._format_price(today.get('ma10'))} | 中短期趋势线 |
-| MA20 | {self._format_price(today.get('ma20'))} | 中期趋势线 |
+| MA5 | {self._format_ma(today.get('ma5'))} | 短期趋势线 |
+| MA10 | {self._format_ma(today.get('ma10'))} | 中短期趋势线 |
+| MA20 | {self._format_ma(today.get('ma20'))} | 中期趋势线 |
+| MA50 | {self._format_ma(today.get('ma50'))} | 机构中期趋势线（美股/港股常用） |
+| MA60 | {self._format_ma(today.get('ma60'))} | 中期趋势线 |
+| MA200 | {self._format_ma(today.get('ma200'))} | 长期趋势线（美股机构常用；N/A 表示历史数据不足 200 个交易日） |
 | 均线形态 | {context.get('ma_status', '未知')} | 多头/空头/缠绕 |
 """
         
@@ -1929,14 +2063,15 @@ class GeminiAnalyzer:
             prompt += f"""
 ### 实时行情增强数据
 > **数据时效**：{session_label}
+> 说明：上方行情行若标注为"最新价"，是分析时点的最新成交价，不是当日收盘价；盘中价格还会变化，不要把它当成已确认的收盘/突破。量比、换手率为数据源口径，成交量若标注"盘中累计"则不可与全天均量直接比较。
 
 | 指标 | 数值 | 解读 |
 |------|------|------|
 | 当前价格 | {self._format_price(rt.get('price'))} {currency} | |
-| **量比** | **{rt.get('volume_ratio', 'N/A')}** | {rt.get('volume_ratio_desc', '')} |
+| **量比** | **{self._display_optional(rt.get('volume_ratio'))}** | {rt.get('volume_ratio_desc', '')} |
 | **换手率** | **{self._format_percent(rt.get('turnover_rate'))}** | |
-| 市盈率(动态) | {rt.get('pe_ratio', 'N/A')} | |
-| 市净率 | {rt.get('pb_ratio', 'N/A')} | |
+| 市盈率(动态) | {self._display_optional(rt.get('pe_ratio'))} | |
+| 市净率 | {self._display_optional(rt.get('pb_ratio'))} | |
 | 总市值 | {self._format_amount(rt.get('total_mv'), currency, market)} | |
 | 流通市值 | {self._format_amount(rt.get('circ_mv'), currency, market)} | |
 | 60日涨跌幅 | {self._format_percent(rt.get('change_60d'))} | 中期表现 |
@@ -1945,46 +2080,72 @@ class GeminiAnalyzer:
         # 添加筹码分布数据
         if 'chip' in context:
             chip = context['chip']
-            profit_ratio = chip.get('profit_ratio', 0)
             prompt += f"""
 ### 筹码分布数据（效率指标）
 | 指标 | 数值 | 健康标准 |
 |------|------|----------|
-| **获利比例** | **{profit_ratio:.1%}** | 70-90%时警惕 |
-| 平均成本 | {chip.get('avg_cost', 'N/A')} {currency} | 现价应高于5-15% |
-| 90%筹码集中度 | {chip.get('concentration_90', 0):.2%} | <15%为集中 |
-| 70%筹码集中度 | {chip.get('concentration_70', 0):.2%} | |
-| 筹码状态 | {chip.get('chip_status', '未知')} | |
+| **获利比例** | **{self._format_ratio(chip.get('profit_ratio'))}** | 70-90%时警惕 |
+| 平均成本 | {self._format_price(chip.get('avg_cost'))} {currency} | 现价应高于5-15% |
+| 90%筹码集中度 | {self._format_ratio(chip.get('concentration_90'))} | <15%为集中 |
+| 70%筹码集中度 | {self._format_ratio(chip.get('concentration_70'))} | |
+| 筹码状态 | {self._display_optional(chip.get('chip_status'), '未知')} | |
+
+> 若上表出现 N/A，说明该市场或该标的不提供筹码数据（美股/港股通常没有），**不要据此推断筹码集中或获利情况**。
 """
         
         # 添加趋势分析结果（基于交易理念的预判）
         if 'trend_analysis' in context:
             trend = context['trend_analysis']
             market = self._resolve_market_context(context).get("market", "cn")
-            bias_value = float(trend.get('bias_ma5', 0) or 0)
+            raw_bias = trend.get('bias_ma5')
+            try:
+                bias_value = float(raw_bias) if raw_bias is not None else None
+            except (TypeError, ValueError):
+                bias_value = None
             ma_alignment_hint = {
                 "cn": "MA5>MA10>MA20 为买入级硬条件",
                 "hk": "优先看趋势结构，再结合公告催化和关键支撑位",
                 "us": "优先看趋势延续/突破确认，再结合财报、市场环境和估值",
             }.get(market, "按市场规则判断趋势结构")
-            if market == "us":
-                bias_warning = "追价风险较高，宜等回踩/突破确认" if bias_value > 5 else "可结合趋势跟踪判断"
-            elif market == "hk":
-                bias_warning = "不宜重仓追价，宜等公告或回踩确认" if bias_value > 6 else "可结合公告/量价判断"
+            # 阈值必须和 stock_analyzer 里打分用的阈值同源，否则提示词说"超 5% 别追"、
+            # 系统却按 15% 打满分，模型和评分会给出相反结论。
+            from src.stock_analyzer import resolve_market_profile
+
+            bias_profile = resolve_market_profile(code, stock_name)
+            bias_threshold = max(
+                float(get_config().bias_threshold),
+                float(bias_profile["base_threshold_floor"]),
+            )
+            trend_status_text = str(trend.get('trend_status') or '')
+            trend_strength_value = trend.get('trend_strength') or 0
+            if trend_status_text == "强势多头" and trend_strength_value >= 70:
+                bias_threshold *= float(bias_profile["strong_multiplier"])
+            threshold_text = f"{bias_threshold:.1f}%"
+            near_band_text = f"{float(bias_profile['near_ma_band']):.1f}%"
+            if bias_value is None:
+                # 乖离率缺失时不要输出"安全范围"这种判断
+                bias_warning = "乖离率数据缺失，无法判断追价风险"
+            elif bias_value > bias_threshold:
+                bias_warning = f"超过 {threshold_text}，{bias_profile['high_bias_risk']}"
+            elif bias_value > float(bias_profile['near_ma_band']):
+                bias_warning = (
+                    f"处于 {near_band_text}~{threshold_text} 警戒区，"
+                    f"{bias_profile['slightly_high_reason']}"
+                )
             else:
-                bias_warning = "超过5%，严禁追高！" if bias_value > 5 else "安全范围"
+                bias_warning = f"在 {near_band_text} 安全区内，仍需结合量能与趋势确认"
             prompt += f"""
 ### 趋势分析预判（基于交易理念）
 | 指标 | 数值 | 判定 |
 |------|------|------|
-| 趋势状态 | {trend.get('trend_status', '未知')} | |
-| 均线排列 | {trend.get('ma_alignment', '未知')} | {ma_alignment_hint} |
-| 趋势强度 | {trend.get('trend_strength', 0)}/100 | |
-| **乖离率(MA5)** | **{trend.get('bias_ma5', 0):+.2f}%** | {bias_warning} |
-| 乖离率(MA10) | {trend.get('bias_ma10', 0):+.2f}% | |
-| 量能状态 | {trend.get('volume_status', '未知')} | {trend.get('volume_trend', '')} |
-| 系统信号 | {trend.get('buy_signal', '未知')} | |
-| 系统评分 | {trend.get('signal_score', 0)}/100 | |
+| 趋势状态 | {self._display_optional(trend.get('trend_status'), '未知')} | |
+| 均线排列 | {self._display_optional(trend.get('ma_alignment'), '未知')} | {ma_alignment_hint} |
+| 趋势强度 | {self._display_optional(trend.get('trend_strength'))}/100 | |
+| **乖离率(MA5)** | **{self._format_signed_percent(trend.get('bias_ma5'))}** | {bias_warning} |
+| 乖离率(MA10) | {self._format_signed_percent(trend.get('bias_ma10'))} | |
+| 量能状态 | {self._display_optional(trend.get('volume_status'), '未知')} | {trend.get('volume_trend', '')} |
+| 系统信号 | {self._display_optional(trend.get('buy_signal'), '未知')} | |
+| 系统评分 | {self._display_optional(trend.get('signal_score'))}/100 | |
 
 #### 系统分析理由
 **买入理由**：
@@ -1993,14 +2154,18 @@ class GeminiAnalyzer:
 **风险因素**：
 {chr(10).join('- ' + r for r in trend.get('risk_factors', ['无'])) if trend.get('risk_factors') else '- 无'}
 """
+
+        # 基本面聚合结果（若数据源有返回）
+        prompt += self._format_fundamental_block(context)
         
         # 添加昨日对比数据
         if 'yesterday' in context:
-            volume_change = context.get('volume_change_ratio', 'N/A')
+            volume_change = context.get('volume_change_ratio')
+            price_change = context.get('price_change_ratio')
             prompt += f"""
 ### 量价变化
-- 成交量较昨日变化：{volume_change}倍
-- 价格较昨日变化：{context.get('price_change_ratio', 'N/A')}%
+- 成交量较昨日变化：{self._display_optional(volume_change)} 倍
+- 价格较昨日变化：{self._format_signed_percent(price_change)}
 """
 
         # 添加历史K线数据（用于中期趋势判断：触底反弹 vs 高位回调）
@@ -2028,7 +2193,7 @@ class GeminiAnalyzer:
 """
         if news_context:
             prompt += f"""
-以下是 **{stock_name}({code})** 近7日检索到的情报，请严格区分“近期事件”和“背景资料”：
+以下是 **{stock_name}({code})** 近期检索到的情报（以条目自带日期为准，超出时效的不要当作最新消息），请严格区分“近期事件”和“背景资料”：
 1. **风险警报**：减持、处罚、利空
 2. **利好催化**：业绩、合同、政策
 3. **业绩预期**：仅可引用近期财报、公司指引、业绩预告、业绩快报
@@ -2043,13 +2208,32 @@ class GeminiAnalyzer:
 未搜索到该股票近期的相关新闻或有效情报。请主要依据技术面数据进行分析。
 """
 
-        # 注入缺失数据警告
-        if context.get('data_missing'):
-            prompt += """
+        # 按实际缺失字段生成警告，而不是只依赖一个布尔标记
+        missing_fields: List[str] = []
+        if today.get('close') is None:
+            missing_fields.append('最新收盘价')
+        if today.get('ma5') is None or today.get('ma20') is None:
+            missing_fields.append('均线（MA5/MA20）')
+        if today.get('volume') is None:
+            missing_fields.append('成交量')
+        realtime_data = context.get('realtime') or {}
+        if realtime_data:
+            if realtime_data.get('volume_ratio') is None:
+                missing_fields.append('量比')
+            if realtime_data.get('turnover_rate') is None:
+                missing_fields.append('换手率')
+        chip_data = context.get('chip')
+        if isinstance(chip_data, dict) and chip_data.get('profit_ratio') is None:
+            missing_fields.append('筹码分布')
+
+        if missing_fields or context.get('data_missing'):
+            detail = '、'.join(missing_fields) if missing_fields else '部分实时行情'
+            prompt += f"""
 **数据缺失警告**
-由于接口限制，当前无法获取完整的实时行情和技术指标数据。
-请 **忽略上述表格中的 N/A 数据**，重点依据 **【舆情情报】** 中的新闻进行基本面和情绪面分析。
-在回答技术面问题（如均线、乖离率）时，请直接说明“数据缺失，无法判断”，**严禁编造数据**。
+以下数据不可用：{detail}。
+- 输出中对应字段一律填 `null`，文字里直接说明“数据缺失，无法判断”；
+- **严禁编造**价格、均线、量比、换手率、筹码等任何数值；
+- 不要因为某项数据缺失而抬高或压低评分，缺失按中性处理。
 """
 
         # 明确的输出要求
@@ -2136,6 +2320,32 @@ class GeminiAnalyzer:
         except (TypeError, ValueError):
             return 'N/A'
 
+    def _format_signed_percent(self, value: Optional[float]) -> str:
+        """带正负号的百分比，用于乖离率等方向性指标。"""
+        if value is None:
+            return 'N/A'
+        try:
+            return f"{float(value):+.2f}%"
+        except (TypeError, ValueError):
+            return 'N/A'
+
+    def _format_ratio(self, value: Optional[float]) -> str:
+        """把 0–1 的比例格式化成百分比；缺失返回 N/A（不要用 0 冒充）。"""
+        if value is None:
+            return 'N/A'
+        try:
+            return f"{float(value) * 100:.2f}%"
+        except (TypeError, ValueError):
+            return 'N/A'
+
+    @staticmethod
+    def _display_optional(value: Any, default: str = 'N/A') -> str:
+        """None / 空串显示为 N/A，避免把 "None" 直接写进提示词。"""
+        if value is None:
+            return default
+        text = str(value).strip()
+        return text if text else default
+
     def _format_price(self, value: Optional[float]) -> str:
         """格式化价格显示"""
         if value is None:
@@ -2144,6 +2354,16 @@ class GeminiAnalyzer:
             return f"{float(value):.2f}"
         except (TypeError, ValueError):
             return 'N/A'
+
+    def _format_ma(self, value: Optional[float]) -> str:
+        """均线数值：0 / 负数视为数据不足，不要显示成 0.00。"""
+        if value is None:
+            return 'N/A'
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 'N/A'
+        return f"{number:.2f}" if number > 0 else 'N/A'
 
     @staticmethod
     def _market_label(market: str) -> str:
@@ -2295,6 +2515,14 @@ class GeminiAnalyzer:
             complement,
         ])
 
+    def _build_truncation_retry_prompt(self, base_prompt: str) -> str:
+        """Retry after hitting max_tokens: ask for a shorter, complete JSON."""
+        return "\n\n".join([
+            base_prompt,
+            "### 上一次输出因长度上限被截断，JSON 不完整。请压缩各字段叙述，"
+            "只输出一个完整、可解析的 JSON；必填键不能省略，未提供的数值填 null。",
+        ])
+
     def _apply_placeholder_fill(self, result: AnalysisResult, missing_fields: List[str]) -> None:
         """Delegate to module-level apply_placeholder_fill."""
         apply_placeholder_fill(result, missing_fields)
@@ -2410,7 +2638,9 @@ class GeminiAnalyzer:
                     trend_prediction=normalized_trend_prediction,
                     operation_advice=normalized_operation_advice,
                     decision_type=final_signal,
-                    confidence_level=data.get('confidence_level', '中'),
+                    confidence_level=_normalize_confidence_level(
+                        data.get('confidence_level'), has_conflict=has_conflict
+                    ),
                     # 决策仪表盘
                     dashboard=dashboard,
                     # 走势分析
@@ -2556,6 +2786,7 @@ class GeminiAnalyzer:
             key_points='JSON解析失败，已降级为保守文本提取结果，仅供参考',
             risk_warning='结构化解析失败，结论已按保守逻辑降级，建议结合原文与其他信息判断',
             raw_response=response_text,
+            parse_mode="text_fallback",
             success=True,
         )
     

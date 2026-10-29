@@ -349,7 +349,9 @@ def resolve_unified_llm_temperature(model: str) -> float:
             except (ValueError, TypeError):
                 continue
 
-    return 0.7
+    # 分析结论要被回测和学习复用，温度过高会让同一份技术面在不同日期
+    # 得到方向相反的结果，测出来的准确率只是在测采样噪声。
+    return 0.3
 
 
 def _get_litellm_provider(model: str) -> str:
@@ -469,7 +471,7 @@ class Config:
     litellm_fallback_models: List[str] = field(default_factory=list)  # Cross-model fallback list
 
     # Unified temperature for all LLM calls (LLM_TEMPERATURE); legacy per-provider temps are fallback only
-    llm_temperature: float = 0.7
+    llm_temperature: float = 0.3
     llm_min_interval: float = 1.0
 
     # --- Multi-channel LLM config (new) ---

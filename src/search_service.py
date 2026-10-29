@@ -3988,9 +3988,10 @@ class SearchService:
             and intel_results["industry"].success
             and intel_results["industry"].results
         ):
+            window_days = int(getattr(self, "news_window_days", 3) or 3)
             lines.append(
                 "注：`行业分析` 维度可能包含百科、公司介绍或历史财务等背景资料，只能作背景参考，"
-                "不能直接当作近7日新闻、最新催化或当前业绩展望。"
+                f"不能直接当作近 {window_days} 日新闻、最新催化或当前业绩展望。"
             )
         
         # 维度展示顺序

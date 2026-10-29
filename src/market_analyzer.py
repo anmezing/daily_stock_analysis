@@ -338,7 +338,7 @@ class MarketAnalyzer:
         review = self.analyzer.generate_text(
             prompt,
             max_tokens=8192,
-            temperature=0.7,
+            temperature=get_config().llm_temperature,
             system_prompt=MARKET_REVIEW_SYSTEM_PROMPT,
         )
 

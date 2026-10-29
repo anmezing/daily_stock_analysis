@@ -228,7 +228,7 @@ class TestAnalyzerMarketPrompt(unittest.TestCase):
 
         prompt = analyzer._format_prompt(context, "Broadcom Inc.", news_context=news_context)
 
-        self.assertIn("近7日检索到的情报", prompt)
+        self.assertIn("近期检索到的情报", prompt)
         self.assertIn("请严格区分“近期事件”和“背景资料”", prompt)
         self.assertIn("不得写成“最新消息”", prompt)
         self.assertIn("旧财年数据只能作背景参考", prompt)

@@ -50,6 +50,9 @@ class VolumeStatus(Enum):
     SHRINK_VOLUME_UP = "缩量上涨"      # 无量上涨
     SHRINK_VOLUME_DOWN = "缩量回调"    # 缩量回调（好）
     NORMAL = "量能正常"
+    # 盘中拿到的当日成交量只是盘中累计值，和完整交易日的均量不可比，
+    # 直接比较会把每一只票都判成"缩量"。
+    INTRADAY_UNKNOWN = "盘中量能未知"
 
 
 class BuySignal(Enum):
@@ -96,7 +99,9 @@ class TrendAnalysisResult:
     ma5: float = 0.0
     ma10: float = 0.0
     ma20: float = 0.0
+    ma50: float = 0.0
     ma60: float = 0.0
+    ma200: float = 0.0
     current_price: float = 0.0
     
     # 乖离率（与 MA5 的偏离度）
@@ -144,7 +149,9 @@ class TrendAnalysisResult:
             'ma5': self.ma5,
             'ma10': self.ma10,
             'ma20': self.ma20,
+            'ma50': self.ma50,
             'ma60': self.ma60,
+            'ma200': self.ma200,
             'current_price': self.current_price,
             'bias_ma5': self.bias_ma5,
             'bias_ma10': self.bias_ma10,
@@ -169,6 +176,96 @@ class TrendAnalysisResult:
             'rsi_status': self.rsi_status.value,
             'rsi_signal': self.rsi_signal,
         }
+
+
+def resolve_market_profile(code: str, stock_name: str = "") -> Dict[str, Any]:
+    """按市场返回追高阈值与措辞。
+
+    只保留一份，供系统评分与提示词共用：两边各写一套阈值时，
+    模型看到的"安全范围"和系统实际打分用的阈值会互相矛盾。
+    """
+    market = get_market_for_stock(code) or "cn"
+    profile = {
+        "cn": {
+            "base_threshold_floor": 5.0,
+            "strong_multiplier": 1.5,
+            "near_ma_band": 2.0,
+            "pullback_near_band": 3.0,
+            "pullback_mid_band": 5.0,
+            "support_tolerance": 0.02,
+            "near_ma_reason": "介入好时机",
+            "slightly_high_reason": "可小仓介入",
+            "high_bias_risk": "严禁追高！",
+            "strong_trend_reason": "可轻仓追踪",
+            "pullback_near_reason": "回踩买点",
+            "pullback_mid_reason": "观察支撑",
+            "deep_pullback_risk": "可能破位",
+            "support_ma5_score": 5,
+            "support_ma10_score": 5,
+            "support_ma5_reason": "MA5支撑有效",
+            "support_ma10_reason": "MA10支撑有效",
+        },
+        "hk": {
+            # 与系统提示词【港股】的 ≤3% 安全区保持同一口径
+            "base_threshold_floor": 6.0,
+            "strong_multiplier": 1.5,
+            "near_ma_band": 3.0,
+            "pullback_near_band": 4.0,
+            "pullback_mid_band": 7.0,
+            "support_tolerance": 0.03,
+            "near_ma_reason": "可结合公告/回踩确认再介入",
+            "slightly_high_reason": "可少量跟踪，但更适合等公告或回踩确认",
+            "high_bias_risk": "不宜重仓追价，等待回踩或公告确认",
+            "strong_trend_reason": "强势趋势中可小仓跟踪，但不宜重仓追价",
+            "pullback_near_reason": "回踩后可结合公告或区间确认再介入",
+            "pullback_mid_reason": "观察关键支撑与公告确认位",
+            "deep_pullback_risk": "回撤过深，警惕区间失守",
+            "support_ma5_score": 2,
+            "support_ma10_score": 4,
+            "support_ma5_reason": "短线均线附近企稳，可作为跟踪参考",
+            "support_ma10_reason": "关键支撑位附近企稳，可作为回测确认",
+        },
+        "us": {
+            # 与系统提示词【美股】的 ≤5% 安全区、>8% 不宜追高保持同一口径。
+            # 此前 base 是 15%、安全区仍是 A 股的 2%，两处都偏离美股习惯。
+            "base_threshold_floor": 8.0,
+            "strong_multiplier": 1.6,
+            "near_ma_band": 5.0,
+            "pullback_near_band": 5.0,
+            "pullback_mid_band": 9.0,
+            "support_tolerance": 0.03,
+            "near_ma_reason": "回踩后可考虑分批跟踪",
+            "slightly_high_reason": "趋势延续可轻仓跟踪，避免一次性追价",
+            "high_bias_risk": "追价风险较高，等待回踩、breakout retest 或下一次确认",
+            "strong_trend_reason": "强势趋势中可继续跟踪，但宜分批并设置波动止损",
+            "pullback_near_reason": "回踩后可考虑继续跟踪，但需结合市场环境确认",
+            "pullback_mid_reason": "观察趋势线、VWAP 或关键均线附近是否重新企稳",
+            "deep_pullback_risk": "回撤过深，趋势可能转弱",
+            "support_ma5_score": 1,
+            "support_ma10_score": 3,
+            "support_ma5_reason": "短线回踩企稳，可辅助观察但不单独构成买点",
+            "support_ma10_reason": "关键均线回踩企稳，可作为趋势延续确认",
+        },
+    }
+    resolved = dict(profile.get(market, profile["cn"]))
+    resolved["market"] = market
+
+    # A-share sub-type adjustments: ST(±5%), 科创板/创业板(±20%), 北交所(±30%)
+    if market == "cn":
+        if is_st_stock(stock_name):
+            resolved["base_threshold_floor"] = 3.0
+            resolved["strong_multiplier"] = 1.3
+            resolved["high_bias_risk"] = "ST 股涨跌停仅 ±5%，严禁追高！"
+        elif is_bse_code(code):
+            resolved["base_threshold_floor"] = 10.0
+            resolved["strong_multiplier"] = 1.6
+            resolved["high_bias_risk"] = "北交所涨跌幅 ±30%，高乖离率风险极大！"
+        elif is_kc_cy_stock(code):
+            resolved["base_threshold_floor"] = 8.0
+            resolved["strong_multiplier"] = 1.6
+            resolved["high_bias_risk"] = "科创板/创业板涨跌幅 ±20%，注意追高风险！"
+
+    return resolved
 
 
 class StockTrendAnalyzer:
@@ -207,75 +304,16 @@ class StockTrendAnalyzer:
 
     @staticmethod
     def _resolve_market_profile(code: str, stock_name: str = "") -> Dict[str, Any]:
-        market = get_market_for_stock(code) or "cn"
-        profile = {
-            "cn": {
-                "base_threshold_floor": 5.0,
-                "strong_multiplier": 1.5,
-                "near_ma_reason": "介入好时机",
-                "slightly_high_reason": "可小仓介入",
-                "high_bias_risk": "严禁追高！",
-                "strong_trend_reason": "可轻仓追踪",
-                "pullback_near_reason": "回踩买点",
-                "pullback_mid_reason": "观察支撑",
-                "deep_pullback_risk": "可能破位",
-                "support_ma5_score": 5,
-                "support_ma10_score": 5,
-                "support_ma5_reason": "MA5支撑有效",
-                "support_ma10_reason": "MA10支撑有效",
-            },
-            "hk": {
-                "base_threshold_floor": 10.0,
-                "strong_multiplier": 1.5,
-                "near_ma_reason": "可结合公告/回踩确认再介入",
-                "slightly_high_reason": "可少量跟踪，但更适合等公告或回踩确认",
-                "high_bias_risk": "不宜重仓追价，等待回踩或公告确认",
-                "strong_trend_reason": "强势趋势中可小仓跟踪，但不宜重仓追价",
-                "pullback_near_reason": "回踩后可结合公告或区间确认再介入",
-                "pullback_mid_reason": "观察关键支撑与公告确认位",
-                "deep_pullback_risk": "回撤过深，警惕区间失守",
-                "support_ma5_score": 2,
-                "support_ma10_score": 4,
-                "support_ma5_reason": "短线均线附近企稳，可作为跟踪参考",
-                "support_ma10_reason": "关键支撑位附近企稳，可作为回测确认",
-            },
-            "us": {
-                "base_threshold_floor": 15.0,
-                "strong_multiplier": 1.6,
-                "near_ma_reason": "回踩后可考虑分批跟踪",
-                "slightly_high_reason": "趋势延续可轻仓跟踪，避免一次性追价",
-                "high_bias_risk": "追价风险较高，等待回踩、breakout retest 或下一次确认",
-                "strong_trend_reason": "强势趋势中可继续跟踪，但宜分批并设置波动止损",
-                "pullback_near_reason": "回踩后可考虑继续跟踪，但需结合市场环境确认",
-                "pullback_mid_reason": "观察趋势线、VWAP 或关键均线附近是否重新企稳",
-                "deep_pullback_risk": "回撤过深，趋势可能转弱",
-                "support_ma5_score": 1,
-                "support_ma10_score": 3,
-                "support_ma5_reason": "短线回踩企稳，可辅助观察但不单独构成买点",
-                "support_ma10_reason": "关键均线回踩企稳，可作为趋势延续确认",
-            },
-        }
-        resolved = dict(profile.get(market, profile["cn"]))
-        resolved["market"] = market
+        return resolve_market_profile(code, stock_name)
 
-        # A-share sub-type adjustments: ST(±5%), 科创板/创业板(±20%), 北交所(±30%)
-        if market == "cn":
-            if is_st_stock(stock_name):
-                resolved["base_threshold_floor"] = 3.0
-                resolved["strong_multiplier"] = 1.3
-                resolved["high_bias_risk"] = "ST 股涨跌停仅 ±5%，严禁追高！"
-            elif is_bse_code(code):
-                resolved["base_threshold_floor"] = 10.0
-                resolved["strong_multiplier"] = 1.6
-                resolved["high_bias_risk"] = "北交所涨跌幅 ±30%，高乖离率风险极大！"
-            elif is_kc_cy_stock(code):
-                resolved["base_threshold_floor"] = 8.0
-                resolved["strong_multiplier"] = 1.6
-                resolved["high_bias_risk"] = "科创板/创业板涨跌幅 ±20%，注意追高风险！"
-
-        return resolved
-    
-    def analyze(self, df: pd.DataFrame, code: str, stock_name: str = "") -> TrendAnalysisResult:
+    def analyze(
+        self,
+        df: pd.DataFrame,
+        code: str,
+        stock_name: str = "",
+        *,
+        intraday: bool = False,
+    ) -> TrendAnalysisResult:
         """
         分析股票趋势
         
@@ -283,12 +321,14 @@ class StockTrendAnalyzer:
             df: 包含 OHLCV 数据的 DataFrame
             code: 股票代码
             stock_name: 股票名称（用于判断 ST 等特殊类型）
+            intraday: 当日是否仍在交易时段；此时最后一根 K 线的成交量只是盘中累计值
             
         Returns:
             TrendAnalysisResult 分析结果
         """
         result = TrendAnalysisResult(code=code)
         result._stock_name = stock_name  # 暂存以便 _generate_signal 使用
+
         
         if df is None or df.empty or len(df) < 20:
             logger.warning(f"{code} 数据不足，无法进行趋势分析")
@@ -311,8 +351,12 @@ class StockTrendAnalyzer:
         result.ma5 = float(latest['MA5'])
         result.ma10 = float(latest['MA10'])
         result.ma20 = float(latest['MA20'])
+        _ma50_raw = latest.get('MA50', 0)
+        result.ma50 = 0.0 if (pd.isna(_ma50_raw)) else float(_ma50_raw)
         _ma60_raw = latest.get('MA60', 0)
         result.ma60 = 0.0 if (pd.isna(_ma60_raw)) else float(_ma60_raw)
+        _ma200_raw = latest.get('MA200', 0)
+        result.ma200 = 0.0 if (pd.isna(_ma200_raw)) else float(_ma200_raw)
 
         # 1. 趋势判断
         self._analyze_trend(df, result)
@@ -321,7 +365,7 @@ class StockTrendAnalyzer:
         self._calculate_bias(result)
 
         # 3. 量能分析
-        self._analyze_volume(df, result)
+        self._analyze_volume(df, result, intraday=intraday)
 
         # 4. 支撑压力分析
         self._analyze_support_resistance(df, result)
@@ -338,18 +382,20 @@ class StockTrendAnalyzer:
         return result
     
     def _calculate_mas(self, df: pd.DataFrame) -> pd.DataFrame:
-        """计算均线"""
+        """计算均线。
+
+        MA50 / MA200 是美股机构的常用趋势锚点（agent 提示词也引用它们），
+        之前只算到 MA60，导致提示词要求关注的指标根本不存在。
+        """
         df = df.copy()
-        df['MA5'] = df['close'].rolling(window=5).mean()
-        df['MA10'] = df['close'].rolling(window=10).mean()
-        df['MA20'] = df['close'].rolling(window=20).mean()
-        if len(df) >= 60:
-            df['MA60'] = df['close'].rolling(window=60).mean()
+        for period in (5, 10, 20, 50, 60):
+            df[f'MA{period}'] = df['close'].rolling(window=period).mean()
+        if len(df) >= 200:
+            df['MA200'] = df['close'].rolling(window=200).mean()
         else:
-            # 数据不足时 MA60 设为 NaN，避免误报为 MA20
-            # analyze() converts NaN → 0.0 when reading result.ma60
-            df['MA60'] = float('nan')
-            logger.debug("数据不足 60 条（当前 %d 条），MA60 设为 NaN", len(df))
+            # 数据不足时设为 NaN，避免用短周期均线冒充长周期
+            df['MA200'] = float('nan')
+            logger.debug("数据不足 200 条（当前 %d 条），MA200 设为 NaN", len(df))
         return df
 
     def _calculate_macd(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -491,11 +537,21 @@ class StockTrendAnalyzer:
         if result.ma20 > 0:
             result.bias_ma20 = (price - result.ma20) / result.ma20 * 100
     
-    def _analyze_volume(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+    def _analyze_volume(
+        self,
+        df: pd.DataFrame,
+        result: TrendAnalysisResult,
+        *,
+        intraday: bool = False,
+    ) -> None:
         """
         分析量能
-        
+
         偏好：缩量回调 > 放量上涨 > 缩量上涨 > 放量下跌
+
+        盘中最后一根 K 线的成交量只是当日累计值，与"前 5 个完整交易日均量"
+        不可比（10:00 时通常只到全天的一到两成）。若不区分，每只票都会被判成
+        缩量，进而拿到 15 分和"缩量回调、洗盘"的正面解读。
         """
         if len(df) < 5:
             return
@@ -510,9 +566,18 @@ class StockTrendAnalyzer:
         
         if vol_5d_avg > 0:
             result.volume_ratio_5d = float(latest['volume']) / vol_5d_avg
+
+        if intraday:
+            result.volume_status = VolumeStatus.INTRADAY_UNKNOWN
+            result.volume_trend = "盘中成交量尚未走完，暂不判断量能形态"
+            return
         
         # 判断价格变化
         prev_close = df.iloc[-2]['close']
+        if not prev_close:
+            result.volume_status = VolumeStatus.NORMAL
+            result.volume_trend = "量能正常"
+            return
         price_change = (latest['close'] - prev_close) / prev_close * 100
         
         # 量能状态判断
@@ -529,7 +594,7 @@ class StockTrendAnalyzer:
                 result.volume_trend = "缩量上涨，上攻动能不足"
             else:
                 result.volume_status = VolumeStatus.SHRINK_VOLUME_DOWN
-                result.volume_trend = "缩量回调，洗盘特征明显（好）"
+                result.volume_trend = "缩量回调，抛压减轻"
         else:
             result.volume_status = VolumeStatus.NORMAL
             result.volume_trend = "量能正常"
@@ -541,18 +606,20 @@ class StockTrendAnalyzer:
         A股更偏 MA5/MA10 回踩支撑，港美股更偏关键均线或确认位
         """
         price = result.current_price
+        profile = resolve_market_profile(result.code, getattr(result, '_stock_name', ''))
+        tolerance = float(profile.get("support_tolerance", self.MA_SUPPORT_TOLERANCE))
         
         # 检查是否在 MA5 附近获得支撑
         if result.ma5 > 0:
             ma5_distance = abs(price - result.ma5) / result.ma5
-            if ma5_distance <= self.MA_SUPPORT_TOLERANCE and price >= result.ma5:
+            if ma5_distance <= tolerance and price >= result.ma5:
                 result.support_ma5 = True
                 result.support_levels.append(result.ma5)
         
         # 检查是否在 MA10 附近获得支撑
         if result.ma10 > 0:
             ma10_distance = abs(price - result.ma10) / result.ma10
-            if ma10_distance <= self.MA_SUPPORT_TOLERANCE and price >= result.ma10:
+            if ma10_distance <= tolerance and price >= result.ma10:
                 result.support_ma10 = True
                 if result.ma10 not in result.support_levels:
                     result.support_levels.append(result.ma10)
@@ -725,18 +792,21 @@ class StockTrendAnalyzer:
             effective_threshold = base_threshold
             is_strong_trend = False
 
+        near_ma_band = float(market_profile.get("near_ma_band", 2.0))
+        pullback_near_band = float(market_profile.get("pullback_near_band", 3.0))
+        pullback_mid_band = float(market_profile.get("pullback_mid_band", 5.0))
         if bias < 0:
             # Price below MA5 (pullback)
-            if bias > -3:
+            if bias > -pullback_near_band:
                 score += 20
                 reasons.append(f"✅ 价格略低于MA5({bias:.1f}%)，{market_profile['pullback_near_reason']}")
-            elif bias > -5:
+            elif bias > -pullback_mid_band:
                 score += 16
                 reasons.append(f"✅ 价格回踩MA5({bias:.1f}%)，{market_profile['pullback_mid_reason']}")
             else:
                 score += 8
                 risks.append(f"⚠️ 乖离率过大({bias:.1f}%)，{market_profile['deep_pullback_risk']}")
-        elif bias < 2:
+        elif bias < near_ma_band:
             score += 18
             reasons.append(f"✅ 价格贴近MA5({bias:.1f}%)，{market_profile['near_ma_reason']}")
         elif bias < base_threshold:
@@ -763,6 +833,7 @@ class StockTrendAnalyzer:
             VolumeStatus.SHRINK_VOLUME_DOWN: 15,  # 缩量回调最佳
             VolumeStatus.HEAVY_VOLUME_UP: 12,     # 放量上涨次之
             VolumeStatus.NORMAL: 10,
+            VolumeStatus.INTRADAY_UNKNOWN: 10,    # 盘中量能不可判定，按中性处理
             VolumeStatus.SHRINK_VOLUME_UP: 6,     # 无量上涨较差
             VolumeStatus.HEAVY_VOLUME_DOWN: 0,    # 放量下跌最差
         }
@@ -770,7 +841,7 @@ class StockTrendAnalyzer:
         score += vol_score
 
         if result.volume_status == VolumeStatus.SHRINK_VOLUME_DOWN:
-            reasons.append("✅ 缩量回调，主力洗盘")
+            reasons.append("✅ 缩量回调，抛压减轻")
         elif result.volume_status == VolumeStatus.HEAVY_VOLUME_DOWN:
             risks.append("⚠️ 放量下跌，注意风险")
 

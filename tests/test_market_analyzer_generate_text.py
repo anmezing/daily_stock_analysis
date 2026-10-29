@@ -210,6 +210,7 @@ class TestMarketAnalyzerBypassFix:
             cfg.llm_model_list = []
             cfg.openai_base_url = None
             cfg.market_review_region = "cn"
+            cfg.llm_temperature = 0.3
             mock_cfg.return_value = cfg
             mock_cfg2.return_value = cfg
 
@@ -285,7 +286,7 @@ class TestMarketAnalyzerBypassFix:
         ma.analyzer.generate_text.assert_called_once()
         _, kwargs = ma.analyzer.generate_text.call_args
         assert kwargs["max_tokens"] == 8192
-        assert kwargs["temperature"] == 0.7
+        assert kwargs["temperature"] == 0.3
 
     def test_market_review_uses_market_review_system_prompt(self):
         """Market review should override the stock dashboard system prompt."""

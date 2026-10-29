@@ -251,9 +251,9 @@ class StockAnalysisPipeline:
                 logger.info(f"{stock_name}({code}) 今日数据已存在，跳过获取（断点续传）")
                 return True, None
 
-            # 从数据源获取数据（拉取足够天数以支持 MA60 + 历史分析窗口）
+            # 从数据源获取数据（拉取足够天数以支持 MA200 + 历史分析窗口）
             logger.info(f"{stock_name}({code}) 开始从数据源获取数据...")
-            df, source_name = self.fetcher_manager.get_daily_data(code, days=120)
+            df, source_name = self.fetcher_manager.get_daily_data(code, days=220)
 
             if df is None or df.empty:
                 return False, "获取数据为空"
@@ -298,6 +298,7 @@ class StockAnalysisPipeline:
 
             # Step 1: 获取实时行情（量比、换手率等）- 使用统一入口，自动故障切换
             realtime_quote = None
+            market_session = get_market_session(get_market_for_stock(code))
             try:
                 realtime_quote = self.fetcher_manager.get_realtime_quote(code)
                 if realtime_quote:
@@ -307,7 +308,7 @@ class StockAnalysisPipeline:
                     # 兼容不同数据源的字段（有些数据源可能没有 volume_ratio）
                     volume_ratio = getattr(realtime_quote, 'volume_ratio', None)
                     turnover_rate = getattr(realtime_quote, 'turnover_rate', None)
-                    session = get_market_session(get_market_for_stock(code))
+                    session = market_session
                     session_tag = {"pre_market": "[盘前]", "trading": "[盘中]", "post_market": "[盘后]", "closed": "[休市]"}.get(session, "")
                     _price_display = round(realtime_quote.price, 4) if realtime_quote.price is not None else None
                     logger.info(f"{stock_name}({code}) 实时行情{session_tag}: 价格={_price_display}, "
@@ -376,14 +377,18 @@ class StockAnalysisPipeline:
             trend_result: Optional[TrendAnalysisResult] = None
             try:
                 end_date = get_market_today(get_market_for_stock(code))
-                start_date = end_date - timedelta(days=89)  # ~60 trading days for MA60
+                # 480 个自然日 ≈ 320 个交易日，保证 MA200 可计算
+                start_date = end_date - timedelta(days=480)
                 historical_bars = self.db.get_data_range(code, start_date, end_date)
                 if historical_bars:
                     df = pd.DataFrame([bar.to_dict() for bar in historical_bars])
                     # Issue #234: Augment with realtime for intraday MA calculation
                     if self.config.enable_realtime_quote and realtime_quote:
                         df = self._augment_historical_with_realtime(df, realtime_quote, code)
-                    trend_result = self.trend_analyzer.analyze(df, code, stock_name)
+                    intraday_bar = self._is_intraday_bar(df, code, market_session)
+                    trend_result = self.trend_analyzer.analyze(
+                        df, code, stock_name, intraday=intraday_bar
+                    )
                     logger.info(f"{stock_name}({code}) 趋势分析: {trend_result.trend_status.value}, "
                               f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}")
             except Exception as e:
@@ -664,6 +669,9 @@ class StockAnalysisPipeline:
                     'ma5': trend_result.ma5,
                     'ma10': trend_result.ma10,
                     'ma20': trend_result.ma20,
+                    'ma50': trend_result.ma50,
+                    'ma60': trend_result.ma60,
+                    'ma200': trend_result.ma200,
                 }
                 if vol is not None:
                     realtime_today['volume'] = vol
@@ -675,6 +683,7 @@ class StockAnalysisPipeline:
                     if k not in realtime_today and v is not None:
                         realtime_today[k] = v
                 enhanced['today'] = realtime_today
+                enhanced['quote_injected'] = True
                 enhanced['ma_status'] = self._compute_ma_status(
                     price, trend_result.ma5, trend_result.ma10, trend_result.ma20
                 )
@@ -701,6 +710,21 @@ class StockAnalysisPipeline:
                                 )
                         except (TypeError, ValueError):
                             pass
+
+        # 趋势结果里的均线是本地重算的，比数据库里可能为空的 ma5/ma10/ma20 更可靠
+        if trend_result and trend_result.ma5 > 0:
+            today_block = enhanced.get('today')
+            if isinstance(today_block, dict):
+                for key, value in (
+                    ('ma5', trend_result.ma5),
+                    ('ma10', trend_result.ma10),
+                    ('ma20', trend_result.ma20),
+                    ('ma50', trend_result.ma50),
+                    ('ma60', trend_result.ma60),
+                    ('ma200', trend_result.ma200),
+                ):
+                    if today_block.get(key) is None and value:
+                        today_block[key] = value
 
         # ETF/index flag for analyzer prompt (Fixes #274)
         enhanced['is_index_etf'] = SearchService.is_index_or_etf(
@@ -729,6 +753,7 @@ class StockAnalysisPipeline:
 
         # Improvement 3+4: inject market session label so LLM knows data timeliness
         enhanced["session_label"] = get_session_label(market_tag)
+        enhanced["is_intraday"] = get_market_session(market_tag) == "trading"
 
         # P0: append unified fundamental block; keep as additional context only
         enhanced["fundamental_context"] = (
@@ -742,7 +767,7 @@ class StockAnalysisPipeline:
 
         return enhanced
 
-    def _ensure_agent_history(self, code: str, min_days: int = 240) -> None:
+    def _ensure_agent_history(self, code: str, min_days: int = 320) -> None:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""
         from src.services.history_loader import get_frozen_target_date
 
@@ -751,7 +776,7 @@ class StockAnalysisPipeline:
             target = get_market_today(get_market_for_stock(code))
         start = target - timedelta(days=int(min_days * 1.8))
         bars = self.db.get_data_range(code, start, target)
-        if bars and len(bars) >= min(min_days, 200):
+        if bars and len(bars) >= min(min_days, 260):
             logger.debug("[%s] Agent history: %d bars in DB, sufficient", code, len(bars))
             return
         try:
@@ -791,6 +816,9 @@ class StockAnalysisPipeline:
                 "stock_name": stock_name,
                 "report_type": report_type.value,
                 "report_language": getattr(self.config, "report_language", "zh"),
+                # 回测要按"做出判断的那一天"取前向行情；缺了它只能退回 created_at，
+                # 而 created_at 是服务器本地时间，美股夜盘/跨时区会错一天。
+                "analysis_date": get_market_today(get_market_for_stock(code)).isoformat(),
                 "fundamental_context": fundamental_context,
             }
             if isinstance(market_context, dict) and market_context:
@@ -1044,6 +1072,25 @@ class StockAnalysisPipeline:
             return "短期走弱 🔽"
         else:
             return "震荡整理 ↔️"
+
+    def _is_intraday_bar(self, df: pd.DataFrame, code: str, market_session: str) -> bool:
+        """最后一根 K 线是否仍是"当日未收盘"的那根。
+
+        只在交易时段内成立：此时成交量只是盘中累计值，不能按全天量能解读。
+        收盘后（post_market/closed）拿到的是完整 K 线，可以正常判断。
+        """
+        if market_session != "trading":
+            return False
+        if df is None or df.empty or "date" not in df.columns:
+            return False
+        try:
+            last_value = df["date"].iloc[-1]
+            last_date = (
+                last_value.date() if hasattr(last_value, "date") else pd.Timestamp(last_value).date()
+            )
+        except (TypeError, ValueError):
+            return False
+        return last_date == get_market_today(get_market_for_stock(code))
 
     def _augment_historical_with_realtime(
         self, df: pd.DataFrame, realtime_quote: Any, code: str

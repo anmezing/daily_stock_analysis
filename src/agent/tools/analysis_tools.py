@@ -18,7 +18,8 @@ def _fetch_trend_data(stock_code: str):
     """Fetch historical OHLCV (DataFrame) for trend analysis. DB first, then DataFetcher fallback."""
     from src.services.history_loader import load_history_df
 
-    df, _ = load_history_df(stock_code, days=60)
+    # MA200 需要至少 200 个交易日；多取一些保证长周期均线可计算
+    df, _ = load_history_df(stock_code, days=260)
     return df
 
 
@@ -51,7 +52,9 @@ def _handle_analyze_trend(stock_code: str) -> dict:
         "ma5": result.ma5,
         "ma10": result.ma10,
         "ma20": result.ma20,
+        "ma50": result.ma50,
         "ma60": result.ma60,
+        "ma200": result.ma200,
         "current_price": result.current_price,
         "bias_ma5": round(result.bias_ma5, 2),
         "bias_ma10": round(result.bias_ma10, 2),

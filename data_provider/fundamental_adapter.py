@@ -55,16 +55,19 @@ def _safe_date(value: Any) -> Optional[datetime]:
 
 
 def _scale_ratio(value: Optional[float]) -> Optional[float]:
-    """Convert ratio-like decimals to percentage points when appropriate."""
+    """Convert ratio-like decimals to percentage points.
+
+    yfinance 的营收/利润增速、ROE、毛利率、机构持股比例都是小数口径
+    （0.12 = 12%）。此前只在 |value| <= 1 时才乘 100，于是 150% 的增速
+    会被显示成 1.5%、120% 的 ROE 被显示成 1.2%，方向没错但量级错两个数量级。
+    """
     if value is None:
         return None
     try:
         ratio = float(value)
     except (TypeError, ValueError):
         return None
-    if abs(ratio) <= 1:
-        ratio *= 100.0
-    return round(ratio, 2)
+    return round(ratio * 100.0, 2)
 
 
 def _clean_html_text(raw: str) -> str:
@@ -540,7 +543,9 @@ class HkYfinanceFundamentalAdapter:
             ),
             "ex_dividend_date": self._coerce_timestamp(info.get("exDividendDate")),
             "dividend_rate": _safe_float(info.get("dividendRate")),
-            "dividend_yield": _scale_ratio(_safe_float(info.get("dividendYield"))),
+            # dividendYield 的口径随 yfinance 版本在"百分数"和"小数"之间变过，
+            # 无法可靠归一化；原样输出，不按比率再乘 100。
+            "dividend_yield_raw": _safe_float(info.get("dividendYield")),
         }
         earnings = {key: value for key, value in earnings.items() if value not in (None, "", [], {})}
         if earnings:

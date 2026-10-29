@@ -877,6 +877,7 @@ class YfinanceFetcher(BaseFetcher):
             # 获取股票名称与估值字段（ticker.info 只取一次，避免重复请求）
             pe_ratio = None
             pb_ratio = None
+            turnover_rate = None
             try:
                 info_dict = ticker.info or {}
                 info_name = info_dict.get('longName', '') or info_dict.get('shortName', '') or ''
@@ -886,6 +887,13 @@ class YfinanceFetcher(BaseFetcher):
                     name = STOCK_NAME_MAP.get(normalized_code, '') or STOCK_NAME_MAP.get(symbol, '')
                 pe_ratio = _positive_float_or_none(info_dict.get('trailingPE'))
                 pb_ratio = _positive_float_or_none(info_dict.get('priceToBook'))
+                # 换手率 = 成交量 / 流通股本：美港股行情源都不直接给，需自行计算
+                float_shares = (
+                    _positive_float_or_none(info_dict.get('floatShares'))
+                    or _positive_float_or_none(info_dict.get('sharesOutstanding'))
+                )
+                if volume and float_shares:
+                    turnover_rate = round(float(volume) / float_shares * 100, 4)
             except Exception:
                 name = STOCK_NAME_MAP.get(normalized_code, '') or STOCK_NAME_MAP.get(symbol, '')
 
@@ -899,7 +907,7 @@ class YfinanceFetcher(BaseFetcher):
                 volume=volume,
                 amount=None,  # yfinance 不直接提供成交额
                 volume_ratio=None,
-                turnover_rate=None,
+                turnover_rate=turnover_rate,
                 amplitude=round(amplitude, 2) if amplitude is not None else None,
                 open_price=open_price,
                 high=high,

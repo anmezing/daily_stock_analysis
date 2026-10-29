@@ -88,3 +88,47 @@ class TestRealtimeValuation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRealtimeTurnoverRate(unittest.TestCase):
+    """换手率需自行计算：成交量 / 流通股本。"""
+
+    def _quote_with_info(self, *, info, volume=5_000_000):
+        fast_info = MagicMock()
+        fast_info.lastPrice = 150.0
+        fast_info.previousClose = 148.0
+        fast_info.open = 149.0
+        fast_info.dayHigh = 151.0
+        fast_info.dayLow = 148.0
+        fast_info.lastVolume = volume
+        fast_info.last_volume = volume
+        fast_info.marketCap = 3_000_000_000_000
+
+        ticker = MagicMock()
+        ticker.fast_info = fast_info
+        ticker.info = info
+
+        with patch("yfinance.Ticker", return_value=ticker):
+            return YfinanceFetcher().get_realtime_quote("AAPL")
+
+    def test_uses_float_shares(self):
+        quote = self._quote_with_info(info={"longName": "Apple", "floatShares": 1_000_000_000})
+        self.assertIsNotNone(quote)
+        self.assertAlmostEqual(quote.turnover_rate, 0.5)
+
+    def test_falls_back_to_shares_outstanding(self):
+        quote = self._quote_with_info(info={"longName": "Apple", "sharesOutstanding": 2_000_000_000})
+        self.assertIsNotNone(quote)
+        self.assertAlmostEqual(quote.turnover_rate, 0.25)
+
+    def test_missing_share_count_leaves_none(self):
+        quote = self._quote_with_info(info={"longName": "Apple"})
+        self.assertIsNotNone(quote)
+        self.assertIsNone(quote.turnover_rate)
+
+    def test_zero_volume_leaves_none(self):
+        quote = self._quote_with_info(
+            info={"longName": "Apple", "floatShares": 1_000_000_000}, volume=0
+        )
+        self.assertIsNotNone(quote)
+        self.assertIsNone(quote.turnover_rate)

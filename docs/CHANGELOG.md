@@ -78,6 +78,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 回测次日开盘跳空穿越止盈/止损时按开盘价成交（`gap_stop` / `gap_take_profit`），不再因目标价失效而丢弃止损、继续持有到窗口结束。
 - [修复] 回测 `insufficient_data` / `error` 记录在后续运行中自动重试，不再必须先执行 `force` 才能重算。
 - [改进] 回测引擎版本追加逻辑修订后缀（如 `v1@no-x2`），新旧指标口径的结果分开汇总，避免混算。
+- [改进] GitHub Actions 每日分析改为美东开盘后 30 分钟触发（10:00 ET：夏令时北京 22:00、冬令时 23:00），避开开盘首分钟的价格噪声与尚未成型的量比/换手率。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

@@ -139,7 +139,7 @@ To get started quickly, you need at minimum:
 
 ### 5. Done!
 
-Default schedule: automatically runs during the **New York 09:30-10:00 post-open window**, usually **21:30-22:00 Beijing during DST** and **22:30-23:00 Beijing during standard time**. GitHub Actions may start scheduled jobs late, so the workflow gates by scheduled cron intent and New York DST/standard-time state instead of the runner's delayed start minute.
+Default schedule: automatically runs **30 minutes after the New York open (10:00 ET)**, usually **22:00 Beijing during DST** and **23:00 Beijing during standard time**. GitHub Actions may start scheduled jobs late, so the workflow gates by scheduled cron intent and New York DST/standard-time state instead of the runner's delayed start minute.
 
 ---
 
@@ -372,8 +372,8 @@ schedule:
   # GitHub Actions only supports UTC. To follow the New York market open
   # across DST changes, declare both UTC candidates and gate by the
   # scheduled cron intent plus the America/New_York DST/standard-time state.
-  - cron: '30 13 * * 1-5'   # DST: 21:30-22:00 Beijing post-open window
-  - cron: '30 14 * * 1-5'   # Standard time: 22:30-23:00 Beijing post-open window
+  - cron: '0 14 * * 1-5'   # DST: 22:00 Beijing, 10:00 New York
+  - cron: '0 15 * * 1-5'   # Standard time: 23:00 Beijing, 10:00 New York
 ```
 
 Common fixed Beijing-time reference:
@@ -390,7 +390,7 @@ For an automatic US market open window that follows DST, use:
 
 | Target window | Cron configuration | Notes |
 |---------|----------------|------|
-| New York 09:30-10:00 | `'30 13 * * 1-5'` + `'30 14 * * 1-5'` | 21:30-22:00 Beijing during DST and 22:30-23:00 during standard time; the workflow gates by scheduled cron intent and New York DST/standard-time state, avoiding duplicate backup cron runs and delayed-runner false skips |
+| New York 10:00 (30 min after open) | `'0 14 * * 1-5'` + `'0 15 * * 1-5'` | 22:00 Beijing during DST and 23:00 during standard time; the workflow gates by scheduled cron intent and New York DST/standard-time state, avoiding duplicate backup cron runs and delayed-runner false skips |
 
 ### Local Scheduled Tasks
 

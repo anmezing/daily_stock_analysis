@@ -190,7 +190,7 @@ Go to `Actions` tab → Click `I understand my workflows, go ahead and enable th
 #### 5. Done!
 
 The system will:
-- Run automatically for the New York 09:30-10:00 post-open window (usually 21:30-22:00 Beijing during DST and 22:30-23:00 during standard time). GitHub Actions may start scheduled jobs late, so the workflow gates by the scheduled cron intent and New York DST/standard-time state instead of the runner's delayed start minute.
+- Run automatically 30 minutes after the New York open (10:00 ET; usually 22:00 Beijing during DST and 23:00 during standard time). GitHub Actions may start scheduled jobs late, so the workflow gates by the scheduled cron intent and New York DST/standard-time state instead of the runner's delayed start minute.
 - Send analysis reports to all configured channels
 - Save reports locally
 

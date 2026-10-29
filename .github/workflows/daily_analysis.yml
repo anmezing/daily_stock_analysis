@@ -3,14 +3,14 @@ name: 每日股票分析
 on:
   # 定时触发
   # GitHub Actions cron 仅支持 UTC，无法自动切换夏令时。
-  # 这里同时监听美东 09:30 的两种 UTC 映射：
-  # - 夏令时：UTC 13:30 = 北京时间 21:30
-  # - 冬令时：UTC 14:30 = 北京时间 22:30
+  # 这里同时监听美东开盘后 30 分钟（10:00 ET）的两种 UTC 映射：
+  # - 夏令时：UTC 14:00 = 美东 10:00 = 北京时间 22:00
+  # - 冬令时：UTC 15:00 = 美东 10:00 = 北京时间 23:00
   # GitHub Actions 可能排队延迟启动；后续按 cron 计划和纽约时区判断，
   # 只允许对应季节的开盘后触发继续执行，避免备用 cron 重复运行。
   schedule:
-    - cron: '30 13 * * 1-5'
-    - cron: '30 14 * * 1-5'
+    - cron: '0 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
   
   # 手动触发
   workflow_dispatch:
@@ -55,16 +55,16 @@ jobs:
           echo "🧭 Scheduled cron: $scheduled_cron"
 
           should_run=false
-          if [[ "$ny_weekday" -ge 1 && "$ny_weekday" -le 5 && "$scheduled_cron" == "30 13 * * 1-5" && "$ny_zone" == "EDT" ]]; then
+          if [[ "$ny_weekday" -ge 1 && "$ny_weekday" -le 5 && "$scheduled_cron" == "0 14 * * 1-5" && "$ny_zone" == "EDT" ]]; then
             should_run=true
-          elif [[ "$ny_weekday" -ge 1 && "$ny_weekday" -le 5 && "$scheduled_cron" == "30 14 * * 1-5" && "$ny_zone" == "EST" ]]; then
+          elif [[ "$ny_weekday" -ge 1 && "$ny_weekday" -le 5 && "$scheduled_cron" == "0 15 * * 1-5" && "$ny_zone" == "EST" ]]; then
             should_run=true
           fi
 
           echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
           if [[ "$should_run" != "true" ]]; then
             echo "ℹ️ 当前 cron 与美东开盘后目标时段不匹配，跳过本次触发。"
-            echo "ℹ️ 目标时段：夏令时北京时间 21:30-22:00（美东 09:30-10:00）；冬令时北京时间 22:30-23:00（美东 09:30-10:00）。"
+            echo "ℹ️ 目标时段：夏令时北京时间 22:00（美东 10:00）；冬令时北京时间 23:00（美东 10:00）。"
           fi
 
       - name: 随机延迟（避免固定时间访问）

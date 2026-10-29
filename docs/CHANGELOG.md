@@ -87,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 Finnhub 公司新闻源（复用 `FINNHUB_API_KEY`，按股票代码直查，免费档 60 次/分钟），比通用网页搜索更精准。
 - [新功能] 新增 Google News RSS 兜底搜索源：免注册、无 API Key、无额度上限，默认开启（`NEWS_RSS_ENABLED=false` 可关闭），避免所有付费搜索源同时失效时情报维度全空。
 - [改进] TwelveData 遇到 403/401 等套餐限制时不再重试三次，改为在进程内标记该接口 1 小时内不可用，减少每只股票约 3 秒的无谓等待。
+- [新功能] Tavily 新增 `TAVILY_BASE_URL` 配置，可指向 Tavily 风格 HTTP 中转（`{base}/search`）；未配置时仍走官方 SDK，行为不变。中转请求同时携带 `Authorization` 头与 body 中的 `api_key`，兼容无法自定义 Header 的实现。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

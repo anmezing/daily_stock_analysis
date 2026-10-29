@@ -526,6 +526,7 @@ class Config:
     bocha_api_keys: List[str] = field(default_factory=list)  # Bocha API Keys
     minimax_api_keys: List[str] = field(default_factory=list)  # MiniMax API Keys
     tavily_api_keys: List[str] = field(default_factory=list)  # Tavily API Keys
+    tavily_base_url: Optional[str] = None  # Tavily 自定义 endpoint（第三方中转），留空用官方
     brave_api_keys: List[str] = field(default_factory=list)  # Brave Search API Keys
     serpapi_keys: List[str] = field(default_factory=list)  # SerpAPI Keys
     xai_api_keys: List[str] = field(default_factory=list)  # xAI X Search API Keys
@@ -1183,6 +1184,7 @@ class Config:
             bocha_api_keys=bocha_api_keys,
             minimax_api_keys=minimax_api_keys,
             tavily_api_keys=tavily_api_keys,
+            tavily_base_url=(os.getenv('TAVILY_BASE_URL') or '').strip() or None,
             brave_api_keys=brave_api_keys,
             serpapi_keys=serpapi_keys,
             xai_api_keys=xai_api_keys,

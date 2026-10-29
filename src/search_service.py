@@ -286,18 +286,30 @@ class BaseSearchProvider(ABC):
 class TavilySearchProvider(BaseSearchProvider):
     """
     Tavily 搜索引擎
-    
+
     特点：
     - 专为 AI/LLM 优化的搜索 API
     - 免费版每月 1000 次请求
     - 返回结构化的搜索结果
-    
+
     文档：https://docs.tavily.com/
+
+    支持指向第三方中转：设置 ``TAVILY_BASE_URL``（例如
+    ``https://tavily.ivanli.cc/api/tavily``），请求会发往 ``{base}/search``。
+    走官方地址时保持为空即可。
     """
-    
-    def __init__(self, api_keys: List[str]):
+
+    DEFAULT_BASE_URL = "https://api.tavily.com"
+
+    def __init__(self, api_keys: List[str], base_url: Optional[str] = None):
         super().__init__(api_keys, "Tavily")
-    
+        resolved = (base_url or os.getenv("TAVILY_BASE_URL") or self.DEFAULT_BASE_URL).strip()
+        self._base_url = (resolved or self.DEFAULT_BASE_URL).rstrip("/")
+
+    @property
+    def is_custom_endpoint(self) -> bool:
+        return self._base_url != self.DEFAULT_BASE_URL
+
     def _do_search(
         self,
         query: str,
@@ -306,72 +318,90 @@ class TavilySearchProvider(BaseSearchProvider):
         days: int = 7,
         topic: Optional[str] = None,
     ) -> SearchResponse:
-        """执行 Tavily 搜索"""
+        """执行 Tavily 搜索（官方走 SDK，自定义中转走 REST）。"""
+        payload: Dict[str, Any] = {
+            "query": query,
+            "search_depth": "advanced",  # advanced 获取更多结果
+            "max_results": max_results,
+            "include_answer": False,
+            "include_raw_content": False,
+            "days": days,  # 搜索最近天数的内容
+        }
+        if topic is not None:
+            payload["topic"] = topic
+
         try:
-            from tavily import TavilyClient
+            data = self._fetch_search(payload, api_key)
         except ImportError:
             return SearchResponse(
                 query=query,
                 results=[],
                 provider=self.name,
                 success=False,
-                error_message="tavily-python 未安装，请运行: pip install tavily-python"
+                error_message="tavily-python 未安装，请运行: pip install tavily-python",
             )
-        
-        try:
-            client = TavilyClient(api_key=api_key)
-            
-            # 执行搜索（优化：使用advanced深度、限制最近几天）
-            search_kwargs: Dict[str, Any] = {
-                "query": query,
-                "search_depth": "advanced",  # advanced 获取更多结果
-                "max_results": max_results,
-                "include_answer": False,
-                "include_raw_content": False,
-                "days": days,  # 搜索最近天数的内容
-            }
-            if topic is not None:
-                search_kwargs["topic"] = topic
-
-            response = client.search(
-                **search_kwargs,
-            )
-            
-            # 记录原始响应到日志
-            logger.info(f"[Tavily] 搜索完成，query='{query}', 返回 {len(response.get('results', []))} 条结果")
-            logger.debug(f"[Tavily] 原始响应: {response}")
-            
-            # 解析结果
-            results = []
-            for item in response.get('results', []):
-                results.append(SearchResult(
-                    title=item.get('title', ''),
-                    snippet=item.get('content', '')[:500],  # 截取前500字
-                    url=item.get('url', ''),
-                    source=self._extract_domain(item.get('url', '')),
-                    published_date=item.get('published_date') or item.get('publishedDate'),
-                ))
-            
-            return SearchResponse(
-                query=query,
-                results=results,
-                provider=self.name,
-                success=True,
-            )
-            
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             error_msg = str(e)
             # 检查是否是配额问题
             if 'rate limit' in error_msg.lower() or 'quota' in error_msg.lower():
                 error_msg = f"API 配额已用尽: {error_msg}"
-            
+
             return SearchResponse(
                 query=query,
                 results=[],
                 provider=self.name,
                 success=False,
-                error_message=error_msg
+                error_message=error_msg,
             )
+
+        logger.info(
+            f"[Tavily] 搜索完成，query='{query}', 返回 {len(data.get('results', []))} 条结果"
+        )
+        logger.debug(f"[Tavily] 原始响应: {data}")
+
+        results = []
+        for item in data.get('results', []):
+            results.append(SearchResult(
+                title=item.get('title', ''),
+                snippet=item.get('content', '')[:500],  # 截取前500字
+                url=item.get('url', ''),
+                source=self._extract_domain(item.get('url', '')),
+                published_date=item.get('published_date') or item.get('publishedDate'),
+            ))
+
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self.name,
+            success=True,
+        )
+
+    def _fetch_search(self, payload: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+        """按 endpoint 类型选择调用方式。
+
+        官方地址保持原有 SDK 调用；配置了 TAVILY_BASE_URL 时改走 Tavily 风格
+        REST（``POST {base}/search``），这样第三方中转无需额外依赖。
+        """
+        if not self.is_custom_endpoint:
+            from tavily import TavilyClient
+
+            client = TavilyClient(api_key=api_key)
+            return client.search(**payload)
+
+        body = dict(payload)
+        # 部分中转无法自定义 Header，官方文档允许退化为 body 里的 api_key
+        body["api_key"] = api_key
+        response = requests.post(
+            f"{self._base_url}/search",
+            json=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def search(
         self,
@@ -2345,6 +2375,7 @@ class SearchService:
         self,
         bocha_keys: Optional[List[str]] = None,
         tavily_keys: Optional[List[str]] = None,
+        tavily_base_url: Optional[str] = None,
         anspire_keys: Optional[List[str]] = None,
         brave_keys: Optional[List[str]] = None,
         serpapi_keys: Optional[List[str]] = None,
@@ -2406,8 +2437,13 @@ class SearchService:
 
         # 2. Tavily（免费额度更多，每月 1000 次）
         if tavily_keys:
-            self._providers.append(TavilySearchProvider(tavily_keys))
-            logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
+            tavily_provider = TavilySearchProvider(tavily_keys, base_url=tavily_base_url)
+            self._providers.append(tavily_provider)
+            logger.info(
+                "已配置 Tavily 搜索，共 %s 个 API Key（endpoint=%s）",
+                len(tavily_keys),
+                tavily_provider._base_url,
+            )
 
         # 3. Brave Search（隐私优先，全球覆盖）
         if brave_keys:
@@ -4258,6 +4294,7 @@ def get_search_service() -> SearchService:
         _search_service = SearchService(
             bocha_keys=config.bocha_api_keys,
             tavily_keys=config.tavily_api_keys,
+            tavily_base_url=getattr(config, "tavily_base_url", None),
             anspire_keys=config.anspire_api_keys,
             brave_keys=config.brave_api_keys,
             serpapi_keys=config.serpapi_keys,

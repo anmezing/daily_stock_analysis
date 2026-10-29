@@ -273,3 +273,68 @@ class TestTavilySearchProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTavilyCustomEndpoint(unittest.TestCase):
+    """配置 TAVILY_BASE_URL 时改走 Tavily 风格 REST 中转。"""
+
+    def _fake_response(self, payload):
+        response = MagicMock()
+        response.json.return_value = payload
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_custom_endpoint_posts_to_base_search(self) -> None:
+        provider = TavilySearchProvider(
+            ["th-relay-token"], base_url="https://tavily.example.com/api/tavily/"
+        )
+        payload = {
+            "results": [
+                {"title": "T", "url": "https://example.com/a", "content": "body"},
+            ]
+        }
+
+        with patch(
+            "src.search_service.requests.post", return_value=self._fake_response(payload)
+        ) as mock_post:
+            resp = provider.search("BABA news", max_results=3, days=2, topic="news")
+
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.results), 1)
+
+        call = mock_post.call_args
+        self.assertEqual(call.args[0], "https://tavily.example.com/api/tavily/search")
+        self.assertEqual(call.kwargs["headers"]["Authorization"], "Bearer th-relay-token")
+        body = call.kwargs["json"]
+        self.assertEqual(body["query"], "BABA news")
+        self.assertEqual(body["topic"], "news")
+        self.assertEqual(body["max_results"], 3)
+        self.assertEqual(body["days"], 2)
+        # 中转无法自定义 Header 时可用 body 里的 api_key
+        self.assertEqual(body["api_key"], "th-relay-token")
+
+    def test_custom_endpoint_reports_http_failure(self) -> None:
+        provider = TavilySearchProvider(["k"], base_url="https://relay.example.com")
+        failing = MagicMock()
+        failing.raise_for_status.side_effect = RuntimeError("401 Unauthorized")
+
+        with patch("src.search_service.requests.post", return_value=failing):
+            resp = provider.search("q", max_results=3, days=2)
+
+        self.assertFalse(resp.success)
+        self.assertIn("401", resp.error_message or "")
+
+    def test_base_url_read_from_env_and_stripped(self) -> None:
+        with patch.dict("os.environ", {"TAVILY_BASE_URL": "https://relay.example.com/v1/"}):
+            provider = TavilySearchProvider(["k"])
+        self.assertEqual(provider._base_url, "https://relay.example.com/v1")
+        self.assertTrue(provider.is_custom_endpoint)
+
+    def test_official_endpoint_is_not_custom(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            import os
+
+            os.environ.pop("TAVILY_BASE_URL", None)
+            provider = TavilySearchProvider(["k"])
+        self.assertEqual(provider._base_url, TavilySearchProvider.DEFAULT_BASE_URL)
+        self.assertFalse(provider.is_custom_endpoint)

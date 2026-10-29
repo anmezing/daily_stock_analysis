@@ -207,3 +207,46 @@ def test_normalize_data_rejects_missing_volume():
 
     with pytest.raises(Exception, match="缺少关键字段"):
         fetcher._normalize_data(df, "AAPL")
+
+# --- /statistics 403 处理 ---------------------------------------------------
+
+
+def _forbidden_response(endpoint: str = "statistics"):
+    import requests
+
+    response = requests.Response()
+    response.status_code = 403
+    response.url = f"https://api.twelvedata.com/{endpoint}"
+    response._content = b'{"code":403,"message":"Forbidden","status":"error"}'
+    return response
+
+
+def test_statistics_403_is_not_retried_and_marked_unsupported():
+    fetcher = _make_fetcher()
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        mock_get.return_value = _forbidden_response()
+
+        assert fetcher._compute_turnover_rate("AAPL", 1_000_000) is None
+        # 403 属于套餐问题，tenacity 不应重试
+        assert mock_get.call_count == 1
+        assert fetcher._endpoint_unsupported("statistics") is True
+
+        # 后续标的直接跳过，不再发请求
+        assert fetcher._compute_turnover_rate("MSFT", 2_000_000) is None
+        assert mock_get.call_count == 1
+
+
+def test_statistics_success_is_still_used():
+    fetcher = _make_fetcher()
+
+    with patch.object(
+        fetcher,
+        "_request",
+        return_value={"stock_statistics": {"float_shares": "1000000000"}},
+    ) as mock_request:
+        rate = fetcher._compute_turnover_rate("AAPL", 10_000_000)
+
+    assert mock_request.call_count == 1
+    assert rate == pytest.approx(1.0)
+    assert fetcher._endpoint_unsupported("statistics") is False

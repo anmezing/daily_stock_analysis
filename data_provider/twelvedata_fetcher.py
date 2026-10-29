@@ -11,6 +11,7 @@ TwelveDataFetcher - Twelve Data API 数据源 (Priority 2)
 
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -19,7 +20,6 @@ import requests
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
@@ -31,6 +31,17 @@ from .us_index_mapping import is_us_stock_code
 logger = logging.getLogger(__name__)
 
 
+class TwelveDataPlanError(DataFetchError):
+    """当前套餐无权限访问该接口（401/403 等），重试没有意义。"""
+
+
+def _is_retryable_request_error(exc: BaseException) -> bool:
+    """只重试网络类错误和临时性失败，套餐/参数类错误不重试。"""
+    if isinstance(exc, TwelveDataPlanError):
+        return False
+    return isinstance(exc, (requests.RequestException, DataFetchError))
+
+
 class TwelveDataFetcher(BaseFetcher):
     """Twelve Data 美股/港股 API 数据源。"""
 
@@ -40,6 +51,8 @@ class TwelveDataFetcher(BaseFetcher):
     BASE_URL = "https://api.twelvedata.com"
     DEFAULT_TIMEOUT = 10
     _FALSEY_VALUES = {"0", "false", "no", "off"}
+    # 某个接口被套餐限制后，多久内不再尝试（进程内）
+    UNSUPPORTED_ENDPOINT_TTL_SECONDS = 3600
 
     def __init__(self):
         self._api_key: str = ""
@@ -48,6 +61,7 @@ class TwelveDataFetcher(BaseFetcher):
         self._us_hk_enable = True
         self._symbol_cache: Dict[str, str] = {}
         self._stock_name_cache: Dict[str, str] = {}
+        self._unsupported_endpoints: Dict[str, float] = {}
 
     def _load_runtime_config(self) -> None:
         api_key = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
@@ -227,7 +241,7 @@ class TwelveDataFetcher(BaseFetcher):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((requests.RequestException, DataFetchError)),
+        retry=_is_retryable_request_error,
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
@@ -246,6 +260,14 @@ class TwelveDataFetcher(BaseFetcher):
             response.raise_for_status()
         except requests.Timeout as exc:
             raise DataFetchError(f"[TwelveDataFetcher] 请求超时: {exc}") from exc
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            # 4xx（除限流 429）属于套餐/参数问题，重试只会浪费时间
+            if status is not None and 400 <= int(status) < 500 and int(status) != 429:
+                raise TwelveDataPlanError(
+                    f"[TwelveDataFetcher] 接口不可用 endpoint={endpoint} HTTP {status}"
+                ) from exc
+            raise DataFetchError(f"[TwelveDataFetcher] 网络请求失败: {exc}") from exc
         except requests.RequestException as exc:
             raise DataFetchError(f"[TwelveDataFetcher] 网络请求失败: {exc}") from exc
 
@@ -260,6 +282,27 @@ class TwelveDataFetcher(BaseFetcher):
             raise DataFetchError(f"[TwelveDataFetcher] API 错误 code={code}: {message}")
 
         return payload
+
+    def _endpoint_unsupported(self, endpoint: str) -> bool:
+        """该接口是否在 TTL 内被判定为套餐不支持。"""
+        marked_at = self._unsupported_endpoints.get(endpoint)
+        if marked_at is None:
+            return False
+        if time.time() - marked_at >= self.UNSUPPORTED_ENDPOINT_TTL_SECONDS:
+            self._unsupported_endpoints.pop(endpoint, None)
+            return False
+        return True
+
+    def _mark_endpoint_unsupported(self, endpoint: str, reason: str) -> None:
+        if self._endpoint_unsupported(endpoint):
+            return
+        self._unsupported_endpoints[endpoint] = time.time()
+        logger.info(
+            "[TwelveDataFetcher] 接口 %s 不可用（%s），%ss 内不再尝试",
+            endpoint,
+            reason,
+            self.UNSUPPORTED_ENDPOINT_TTL_SECONDS,
+        )
 
     def get_stock_name(self, stock_code: str) -> str:
         normalized = normalize_stock_code(stock_code).strip().upper()
@@ -417,9 +460,15 @@ class TwelveDataFetcher(BaseFetcher):
         """
         if not current_volume or current_volume <= 0:
             return None
+        if self._endpoint_unsupported("statistics"):
+            return None
 
         try:
             payload = self._request("statistics", {"symbol": symbol})
+        except TwelveDataPlanError as exc:
+            # 套餐不含该接口：本次进程内不再尝试，避免每只股票白等三次重试
+            self._mark_endpoint_unsupported("statistics", str(exc))
+            return None
         except Exception as exc:
             logger.debug("[TwelveDataFetcher] 换手率补算失败(symbol=%s): %s", symbol, exc)
             return None

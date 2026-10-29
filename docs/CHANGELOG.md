@@ -82,6 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [文档] 补充用 OpenRouter `:free` 模型替代付费 OpenAI 的配置方式（模型 ID 需带 `openai/` 前缀），并说明 OpenCode 免费模型不对外部客户端开放（HTTP 403）。
 - [改进] GitHub Actions 的 Gemini 调用节奏按免费档限流收紧：请求间隔 3s→7s（免费档约 10 RPM），重试次数 5→2，避免 429 时白等；同时说明免费额度按 Google Cloud 项目计，多 Key 需来自不同项目才能叠加。
 - [修复] 修复外部 PostgreSQL/Supabase 连接在新版 SQLAlchemy 下启动失败（`No module named 'psycopg'`）：`get_db_url()` 把裸 `postgresql://` 固定为 `postgresql+psycopg2://`（显式指定驱动的不改写），并将 SQLAlchemy 版本封顶 `<2.2`，避免默认驱动随上游版本漂移。
+- [修复] 学习校准只读取当前回测引擎版本（含 entry_mode 与逻辑修订后缀）的样本，避免旧口径（long 结果按期末涨跌、现金收益记 0、缺口不成交）与新口径混训导致模型学到矛盾映射。
+- [修复] PostgreSQL 连接建立时自动纠正被托管连接池（如 Supabase pooler）下发的只读会话默认值，修复日志中 `cannot execute INSERT/UPDATE in a read-only transaction` 导致已分析结果、行情缓存和用量记录全部无法落库的问题；仅在检测到 `default_transaction_read_only=on` 时发送 `SET`，正常库上为空操作。
+- [新功能] 新增 Finnhub 公司新闻源（复用 `FINNHUB_API_KEY`，按股票代码直查，免费档 60 次/分钟），比通用网页搜索更精准。
+- [新功能] 新增 Google News RSS 兜底搜索源：免注册、无 API Key、无额度上限，默认开启（`NEWS_RSS_ENABLED=false` 可关闭），避免所有付费搜索源同时失效时情报维度全空。
+- [改进] TwelveData 遇到 403/401 等套餐限制时不再重试三次，改为在进程内标记该接口 1 小时内不可用，减少每只股票约 3 秒的无谓等待。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

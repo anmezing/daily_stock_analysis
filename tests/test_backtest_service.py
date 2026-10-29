@@ -110,6 +110,32 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(stats3["saved"], 1)
         self.assertEqual(self._count_results(), 1)
 
+    def test_incomplete_results_are_retried(self) -> None:
+        """Rows left as insufficient_data are retried instead of being skipped forever."""
+        with self.db.get_session() as session:
+            history = session.query(AnalysisHistory).one()
+            session.add(
+                BacktestResult(
+                    analysis_history_id=history.id,
+                    code=history.code,
+                    eval_window_days=3,
+                    engine_version="v1@no-x2",
+                    eval_status="insufficient_data",
+                    evaluated_at=datetime.now(),
+                )
+            )
+            session.commit()
+
+        service = BacktestService(self.db)
+        stats = service.run_backtest(code="600519", force=False, eval_window_days=3, min_age_days=0, limit=10)
+
+        self.assertEqual(stats["saved"], 1)
+        self.assertEqual(stats["completed"], 1)
+        with self.db.get_session() as session:
+            rows = session.query(BacktestResult).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].eval_status, "completed")
+
     def test_entry_mode_changes_backtest_identity(self) -> None:
         service = BacktestService(self.db)
         stats1 = service.run_backtest(code="600519", force=False, eval_window_days=3, min_age_days=0, limit=10)
@@ -125,7 +151,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 row.engine_version
                 for row in session.query(BacktestResult).order_by(BacktestResult.engine_version).all()
             }
-        self.assertEqual(versions, {"v1@ac", "v1@no"})
+        self.assertEqual(versions, {"v1@ac-x2", "v1@no-x2"})
 
     def _run_and_get_result(self) -> BacktestResult:
         """Helper: run backtest and return the single BacktestResult row."""
@@ -139,7 +165,7 @@ class BacktestServiceTestCase(unittest.TestCase):
         result = self._run_and_get_result()
 
         self.assertEqual(result.eval_status, "completed")
-        self.assertEqual(result.engine_version, "v1@no")
+        self.assertEqual(result.engine_version, "v1@no-x2")
         self.assertEqual(result.code, "600519")
         self.assertEqual(result.analysis_date, date(2024, 1, 1))
         self.assertEqual(result.operation_advice, "买入")
@@ -302,7 +328,9 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertIsNotNone(s1)
             self.assertIsNotNone(s2)
             self.assertEqual(s1.win_count, 1)
-            self.assertEqual(s2.win_count, 1)
+            # Cash advice has no simulated trade, so it is not counted as a trade win.
+            self.assertEqual(s2.win_count, 0)
+            self.assertEqual(s2.cash_count, 1)
 
             # Overall aggregates both
             overall = session.query(BacktestSummary).filter(
@@ -312,7 +340,7 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertIsNotNone(overall)
             self.assertEqual(overall.total_evaluations, 2)
             self.assertEqual(overall.completed_count, 2)
-            self.assertEqual(overall.win_count, 2)
+            self.assertEqual(overall.win_count, 1)
 
 
 if __name__ == "__main__":

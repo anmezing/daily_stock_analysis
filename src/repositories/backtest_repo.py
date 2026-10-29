@@ -49,6 +49,7 @@ class BacktestRepository:
                     and_(
                         BacktestResult.eval_window_days == eval_window_days,
                         BacktestResult.engine_version == engine_version,
+                        BacktestResult.eval_status == "completed",
                     )
                 )
                 query = query.where(AnalysisHistory.id.not_in(existing_ids))
@@ -68,10 +69,10 @@ class BacktestRepository:
 
         with self.db.get_session() as session:
             try:
-                if replace_existing:
-                    analysis_ids = sorted({r.analysis_history_id for r in results if r.analysis_history_id is not None})
-                    key_pairs = sorted({(r.eval_window_days, r.engine_version) for r in results})
+                analysis_ids = sorted({r.analysis_history_id for r in results if r.analysis_history_id is not None})
+                key_pairs = sorted({(r.eval_window_days, r.engine_version) for r in results})
 
+                if replace_existing:
                     if analysis_ids and key_pairs:
                         for window_days, engine_version in key_pairs:
                             session.execute(
@@ -83,6 +84,20 @@ class BacktestRepository:
                                     )
                                 )
                             )
+                elif analysis_ids and key_pairs:
+                    # Retried rows (insufficient_data/error) are written again on the
+                    # same unique key, so clear the stale non-completed rows first.
+                    for window_days, engine_version in key_pairs:
+                        session.execute(
+                            delete(BacktestResult).where(
+                                and_(
+                                    BacktestResult.analysis_history_id.in_(analysis_ids),
+                                    BacktestResult.eval_window_days == window_days,
+                                    BacktestResult.engine_version == engine_version,
+                                    BacktestResult.eval_status != "completed",
+                                )
+                            )
+                        )
 
                 session.add_all(results)
                 session.commit()

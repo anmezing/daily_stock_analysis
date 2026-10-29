@@ -47,7 +47,42 @@ class BacktestSummaryTestCase(unittest.TestCase):
         # ambiguous_rate denominator should be 2 (any target applicable)
         self.assertEqual(summary["ambiguous_rate"], 0.0)
 
+    def test_win_rate_ignores_cash_rows(self) -> None:
+        # A correct "sell"/"wait" call has no simulated trade. It still counts
+        # toward direction accuracy but must not dilute trade win rate or
+        # average simulated return.
+        rows = [
+            FakeRow(
+                position_recommendation="long",
+                outcome="loss",
+                direction_correct=False,
+                stock_return_pct=-5.0,
+                simulated_return_pct=-5.0,
+            ),
+            FakeRow(
+                position_recommendation="cash",
+                outcome="win",
+                direction_correct=True,
+                stock_return_pct=-5.0,
+                simulated_return_pct=0.0,
+            ),
+        ]
+
+        summary = BacktestEngine.compute_summary(
+            results=rows,
+            scope="overall",
+            code="__overall__",
+            eval_window_days=3,
+            engine_version="v2",
+        )
+
+        self.assertEqual(summary["win_count"], 0)
+        self.assertEqual(summary["loss_count"], 1)
+        self.assertEqual(summary["win_rate_pct"], 0.0)
+        self.assertAlmostEqual(summary["avg_simulated_return_pct"], -5.0)
+        self.assertEqual(summary["direction_accuracy_pct"], 50.0)
+        self.assertEqual(summary["diagnostics"]["metric_scope"]["win_rate"], "long_simulated")
+
 
 if __name__ == "__main__":
     unittest.main()
-

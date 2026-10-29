@@ -63,7 +63,9 @@ get_strategy_backtest_summary_tool = ToolDefinition(
     name="get_strategy_backtest_summary",
     description=(
         "Get overall strategy backtest performance summary (win rate, direction accuracy, "
-        "avg return, stop-loss/take-profit trigger rates). Read-only, does not trigger new backtests."
+        "avg return, stop-loss/take-profit trigger rates). Win rate and avg simulated return "
+        "cover simulated long fills only; cash signals are reflected in direction accuracy. "
+        "Read-only, does not trigger new backtests."
     ),
     parameters=[
         ToolParameter(
@@ -140,7 +142,8 @@ get_stock_backtest_summary_tool = ToolDefinition(
     name="get_stock_backtest_summary",
     description=(
         "Get backtest performance data for a specific stock: per-stock summary (win rate, "
-        "accuracy, avg return) plus recent evaluation records. Read-only, does not trigger new backtests."
+        "accuracy, avg return) plus recent evaluation records. Win rate and avg simulated "
+        "return cover simulated long fills only. Read-only, does not trigger new backtests."
     ),
     parameters=[
         ToolParameter(

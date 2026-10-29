@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import and_, select
 
 from src.config import get_config
-from src.core.backtest_engine import OVERALL_SENTINEL_CODE, BacktestEngine, EvaluationConfig
+from src.core.backtest_engine import (
+    EXECUTION_LOGIC_REVISION,
+    OVERALL_SENTINEL_CODE,
+    BacktestEngine,
+    EvaluationConfig,
+)
 from src.repositories.backtest_repo import BacktestRepository
 from src.repositories.stock_repo import StockRepository
 from src.services.analysis_calibration_model import SmallCalibrationModel
@@ -305,7 +310,7 @@ class BacktestService:
         base = str(engine_version or "v1").strip() or "v1"
         if "@" in base:
             return base
-        return f"{base}@{suffix_map.get(entry_mode, 'no')}"
+        return f"{base}@{suffix_map.get(entry_mode, 'no')}-{EXECUTION_LOGIC_REVISION}"
 
     def _try_fill_daily_data(self, *, code: str, analysis_date: date, eval_window_days: int) -> None:
         try:

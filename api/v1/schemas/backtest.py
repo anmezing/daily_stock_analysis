@@ -79,11 +79,21 @@ class PerformanceMetrics(BaseModel):
     loss_count: int
     neutral_count: int
 
-    direction_accuracy_pct: Optional[float] = None
-    win_rate_pct: Optional[float] = None
-    neutral_rate_pct: Optional[float] = None
-    avg_stock_return_pct: Optional[float] = None
-    avg_simulated_return_pct: Optional[float] = None
+    direction_accuracy_pct: Optional[float] = Field(
+        None, description="方向准确率：全部已完成记录，按窗口末涨跌判定"
+    )
+    win_rate_pct: Optional[float] = Field(
+        None, description="执行胜率：仅统计 long 仓位的模拟成交结果，不含现金信号与中性"
+    )
+    neutral_rate_pct: Optional[float] = Field(
+        None, description="中性占比：分母为 long 仓位模拟成交记录"
+    )
+    avg_stock_return_pct: Optional[float] = Field(
+        None, description="平均股票收益率：全部已完成记录"
+    )
+    avg_simulated_return_pct: Optional[float] = Field(
+        None, description="平均模拟执行收益率：仅统计 long 仓位，含止盈止损与缺口成交"
+    )
 
     stop_loss_trigger_rate: Optional[float] = None
     take_profit_trigger_rate: Optional[float] = None
@@ -93,4 +103,3 @@ class PerformanceMetrics(BaseModel):
     advice_breakdown: Dict[str, Any] = Field(default_factory=dict)
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
     learning_model: Dict[str, Any] = Field(default_factory=dict)
-

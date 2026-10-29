@@ -14,15 +14,24 @@ class Bar:
     high: float
     low: float
     close: float
+    open: float | None = None
 
 
 class BacktestEngineTestCase(unittest.TestCase):
-    def _bars(self, start: date, closes, highs=None, lows=None):
+    def _bars(self, start: date, closes, highs=None, lows=None, opens=None):
         highs = highs or closes
         lows = lows or closes
         bars = []
         for i, c in enumerate(closes):
-            bars.append(Bar(date=start + timedelta(days=i + 1), high=highs[i], low=lows[i], close=c))
+            bars.append(
+                Bar(
+                    date=start + timedelta(days=i + 1),
+                    high=highs[i],
+                    low=lows[i],
+                    close=c,
+                    open=opens[i] if opens else None,
+                )
+            )
         return bars
 
     def test_buy_win_when_up(self):
@@ -279,6 +288,104 @@ class BacktestEngineTestCase(unittest.TestCase):
         # "wait" matches first in priority order → cash
         pos = BacktestEngine.infer_position_recommendation("wait for a dip then buy")
         self.assertEqual(pos, "cash")
+
+    def test_gap_down_through_stop_exits_at_open(self):
+        cfg = EvaluationConfig(eval_window_days=2, neutral_band_pct=2.0)
+        bars = self._bars(
+            date(2024, 1, 1),
+            [91, 100],
+            highs=[92, 101],
+            lows=[88, 99],
+            opens=[90, 95],
+        )
+        res = BacktestEngine.evaluate_single(
+            operation_advice="买入",
+            analysis_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=bars,
+            stop_loss=95,
+            take_profit=120,
+            config=cfg,
+        )
+        self.assertEqual(res["simulated_exit_reason"], "gap_stop")
+        self.assertAlmostEqual(res["simulated_exit_price"], 90.0)
+        self.assertAlmostEqual(res["simulated_return_pct"], 0.0)
+        self.assertTrue(res["hit_stop_loss"])
+        self.assertEqual(res["first_hit"], "stop_loss")
+        # The gap fill is flat, so the trade itself is neutral even though the
+        # stock later rallied.
+        self.assertEqual(res["outcome"], "neutral")
+        self.assertTrue(res["direction_correct"])
+
+    def test_gap_up_through_take_profit_exits_at_open(self):
+        cfg = EvaluationConfig(eval_window_days=2, neutral_band_pct=2.0)
+        bars = self._bars(
+            date(2024, 1, 1),
+            [115, 116],
+            highs=[118, 117],
+            lows=[114, 115],
+            opens=[112, 115],
+        )
+        res = BacktestEngine.evaluate_single(
+            operation_advice="买入",
+            analysis_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=bars,
+            stop_loss=95,
+            take_profit=110,
+            config=cfg,
+        )
+        self.assertEqual(res["simulated_exit_reason"], "gap_take_profit")
+        self.assertAlmostEqual(res["simulated_exit_price"], 112.0)
+        self.assertAlmostEqual(res["simulated_return_pct"], 0.0)
+        self.assertTrue(res["hit_take_profit"])
+        self.assertEqual(res["first_hit"], "take_profit")
+
+    def test_open_inside_targets_still_exits_at_target(self):
+        cfg = EvaluationConfig(eval_window_days=2, neutral_band_pct=2.0)
+        bars = self._bars(
+            date(2024, 1, 1),
+            [96, 97],
+            highs=[97, 98],
+            lows=[94, 95],
+            opens=[100, 96],
+        )
+        res = BacktestEngine.evaluate_single(
+            operation_advice="买入",
+            analysis_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=bars,
+            stop_loss=95,
+            take_profit=120,
+            config=cfg,
+        )
+        self.assertEqual(res["simulated_exit_reason"], "stop_loss")
+        self.assertAlmostEqual(res["simulated_exit_price"], 95.0)
+        self.assertAlmostEqual(res["simulated_return_pct"], -5.0)
+
+    def test_cash_position_ignores_gap_targets(self):
+        cfg = EvaluationConfig(eval_window_days=2, neutral_band_pct=2.0)
+        bars = self._bars(
+            date(2024, 1, 1),
+            [89, 88],
+            highs=[90, 89],
+            lows=[87, 86],
+            opens=[90, 88],
+        )
+        res = BacktestEngine.evaluate_single(
+            operation_advice="卖出",
+            analysis_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=bars,
+            stop_loss=95,
+            take_profit=120,
+            config=cfg,
+        )
+        self.assertEqual(res["position_recommendation"], "cash")
+        self.assertEqual(res["first_hit"], "not_applicable")
+        self.assertIsNone(res["hit_stop_loss"])
+        self.assertEqual(res["direction_expected"], "down")
+        self.assertTrue(res["direction_correct"])
 
 
 if __name__ == "__main__":

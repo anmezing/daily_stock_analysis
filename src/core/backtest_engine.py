@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
 
 OVERALL_SENTINEL_CODE = "__overall__"
+EXECUTION_LOGIC_REVISION = "x2"
 
 
 class DailyBarLike(Protocol):
@@ -135,6 +136,10 @@ class BacktestEngine:
         - Daily bars cannot determine intraday ordering. If stop-loss and
           take-profit are both touched in the same bar, we record
           first_hit="ambiguous" and assume stop-loss first for simulated exit.
+        - A next-bar open that gaps through a target valid versus the analysis
+          close exits at that open. The target is not discarded.
+        - Long outcome follows the simulated fill. direction_correct still
+          follows the end-of-window move.
         """
 
         if start_price is None or start_price <= 0:
@@ -184,11 +189,32 @@ class BacktestEngine:
         max_high = max(highs) if highs else None
         min_low = min(lows) if lows else None
 
-        stop_loss, take_profit = cls._sanitize_long_targets(
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-        )
+        direction_expected = cls.infer_direction_expected(operation_advice)
+        position = cls.infer_position_recommendation(operation_advice)
+
+        raw_stop_loss = stop_loss
+        raw_take_profit = take_profit
+        gap_exit = None
+        if position == "long":
+            gap_exit = cls._resolve_gap_exit(
+                analysis_close=float(start_price),
+                entry_price=entry_price,
+                stop_loss=raw_stop_loss,
+                take_profit=raw_take_profit,
+                entry_date=window_bars[0].date,
+            )
+        if gap_exit is None:
+            stop_loss, take_profit = cls._sanitize_long_targets(
+                entry_price=entry_price,
+                stop_loss=raw_stop_loss,
+                take_profit=raw_take_profit,
+            )
+        else:
+            stop_loss, take_profit = cls._targets_valid_vs_analysis_close(
+                analysis_close=float(start_price),
+                stop_loss=raw_stop_loss,
+                take_profit=raw_take_profit,
+            )
 
         stock_return_pct: Optional[float]
         if end_close is None:
@@ -196,30 +222,38 @@ class BacktestEngine:
         else:
             stock_return_pct = (end_close - entry_price) / entry_price * 100
 
-        direction_expected = cls.infer_direction_expected(operation_advice)
-        position = cls.infer_position_recommendation(operation_advice)
-
-        outcome, direction_correct = cls._classify_outcome(
+        _, direction_correct = cls._classify_outcome(
             stock_return_pct=stock_return_pct,
             direction_expected=direction_expected,
             neutral_band_pct=config.neutral_band_pct,
         )
 
-        (
-            hit_stop_loss,
-            hit_take_profit,
-            first_hit,
-            first_hit_date,
-            first_hit_days,
-            simulated_exit_price,
-            simulated_exit_reason,
-        ) = cls._evaluate_targets(
-            position=position,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            window_bars=window_bars,
-            end_close=end_close,
-        )
+        if gap_exit is None:
+            (
+                hit_stop_loss,
+                hit_take_profit,
+                first_hit,
+                first_hit_date,
+                first_hit_days,
+                simulated_exit_price,
+                simulated_exit_reason,
+            ) = cls._evaluate_targets(
+                position=position,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                window_bars=window_bars,
+                end_close=end_close,
+            )
+        else:
+            (
+                hit_stop_loss,
+                hit_take_profit,
+                first_hit,
+                first_hit_date,
+                first_hit_days,
+                simulated_exit_price,
+                simulated_exit_reason,
+            ) = gap_exit
 
         simulated_entry_price = entry_price if position == "long" else None
         simulated_return_pct: Optional[float]
@@ -229,6 +263,19 @@ class BacktestEngine:
             simulated_return_pct = None
         else:
             simulated_return_pct = (simulated_exit_price - entry_price) / entry_price * 100
+
+        if position == "long" and simulated_return_pct is not None:
+            outcome, _ = cls._classify_outcome(
+                stock_return_pct=simulated_return_pct,
+                direction_expected=direction_expected,
+                neutral_band_pct=config.neutral_band_pct,
+            )
+        else:
+            outcome, _ = cls._classify_outcome(
+                stock_return_pct=stock_return_pct,
+                direction_expected=direction_expected,
+                neutral_band_pct=config.neutral_band_pct,
+            )
 
         return {
             "analysis_date": analysis_date,
@@ -278,9 +325,10 @@ class BacktestEngine:
         long_count = sum(1 for r in completed if (r.position_recommendation or "") == "long")
         cash_count = sum(1 for r in completed if (r.position_recommendation or "") == "cash")
 
-        win_count = sum(1 for r in completed if (r.outcome or "") == "win")
-        loss_count = sum(1 for r in completed if (r.outcome or "") == "loss")
-        neutral_count = sum(1 for r in completed if (r.outcome or "") == "neutral")
+        execution_rows = [r for r in completed if (r.position_recommendation or "") == "long"]
+        win_count = sum(1 for r in execution_rows if (r.outcome or "") == "win")
+        loss_count = sum(1 for r in execution_rows if (r.outcome or "") == "loss")
+        neutral_count = sum(1 for r in execution_rows if (r.outcome or "") == "neutral")
 
         direction_denominator = sum(1 for r in completed if r.direction_correct is not None)
         direction_numerator = sum(1 for r in completed if r.direction_correct is True)
@@ -290,10 +338,10 @@ class BacktestEngine:
 
         win_loss_denominator = win_count + loss_count
         win_rate_pct = round(win_count / win_loss_denominator * 100, 2) if win_loss_denominator else None
-        neutral_rate_pct = round(neutral_count / len(completed) * 100, 2) if completed else None
+        neutral_rate_pct = round(neutral_count / len(execution_rows) * 100, 2) if execution_rows else None
 
         avg_stock_return_pct = cls._average([r.stock_return_pct for r in completed])
-        avg_simulated_return_pct = cls._average([r.simulated_return_pct for r in completed])
+        avg_simulated_return_pct = cls._average([r.simulated_return_pct for r in execution_rows])
 
         stop_applicable = [
             r
@@ -459,6 +507,72 @@ class BacktestEngine:
 
         return clean_stop_loss, clean_take_profit
 
+    @staticmethod
+    def _targets_valid_vs_analysis_close(
+        *,
+        analysis_close: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+    ) -> tuple[Optional[float], Optional[float]]:
+        clean_stop_loss: Optional[float] = None
+        clean_take_profit: Optional[float] = None
+        if analysis_close is None or analysis_close <= 0:
+            return None, None
+        if stop_loss is not None:
+            value = float(stop_loss)
+            if 0 < value < analysis_close:
+                clean_stop_loss = value
+        if take_profit is not None:
+            value = float(take_profit)
+            if value > analysis_close:
+                clean_take_profit = value
+        return clean_stop_loss, clean_take_profit
+
+    @classmethod
+    def _resolve_gap_exit(
+        cls,
+        *,
+        analysis_close: float,
+        entry_price: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        entry_date: date,
+    ) -> Optional[tuple]:
+        """Exit at the entry open when that open already gaps through a valid target."""
+        if analysis_close is None or analysis_close <= 0 or entry_price is None or entry_price <= 0:
+            return None
+
+        valid_stop, valid_take_profit = cls._targets_valid_vs_analysis_close(
+            analysis_close=analysis_close,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
+        stop_gap = valid_stop is not None and entry_price <= valid_stop
+        take_profit_gap = valid_take_profit is not None and entry_price >= valid_take_profit
+        if not stop_gap and not take_profit_gap:
+            return None
+
+        hit_stop_loss: Optional[bool] = None if valid_stop is None else stop_gap
+        hit_take_profit: Optional[bool] = None if valid_take_profit is None else take_profit_gap
+        if stop_gap and take_profit_gap:
+            first_hit = "ambiguous"
+            exit_reason = "gap_stop"
+        elif stop_gap:
+            first_hit = "stop_loss"
+            exit_reason = "gap_stop"
+        else:
+            first_hit = "take_profit"
+            exit_reason = "gap_take_profit"
+
+        return (
+            hit_stop_loss,
+            hit_take_profit,
+            first_hit,
+            entry_date,
+            1,
+            entry_price,
+            exit_reason,
+        )
 
     @classmethod
     def _classify_outcome(
@@ -633,4 +747,9 @@ class BacktestEngine:
         return {
             "eval_status": status_counts,
             "first_hit": first_hit_counts,
+            "metric_scope": {
+                "win_rate": "long_simulated",
+                "avg_simulated_return": "long_only",
+                "direction_accuracy": "all_completed",
+            },
         }

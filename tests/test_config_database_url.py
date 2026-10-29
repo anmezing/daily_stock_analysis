@@ -13,7 +13,8 @@ def test_get_db_url_prefers_external_database_url():
         database_path="./data/should_not_be_used.db",
     )
 
-    assert cfg.get_db_url() == "postgresql://user:pass@db.example.com:5432/postgres"
+    # 裸 postgresql:// 会按 SQLAlchemy 版本落到不同驱动，必须固定为 psycopg2
+    assert cfg.get_db_url() == "postgresql+psycopg2://user:pass@db.example.com:5432/postgres"
 
 
 def test_get_db_url_falls_back_to_sqlite_and_creates_parent(tmp_path):
@@ -38,7 +39,18 @@ def test_get_db_url_normalizes_legacy_postgres_scheme():
         database_path="./data/should_not_be_used.db",
     )
 
-    assert cfg.get_db_url() == "postgresql://user:pass@db.example.com:5432/postgres"
+    assert cfg.get_db_url() == "postgresql+psycopg2://user:pass@db.example.com:5432/postgres"
+
+
+def test_get_db_url_keeps_explicit_driver():
+    """显式指定驱动的 URL 不应被改写（例如用户自己装了 psycopg v3）。"""
+    cfg = Config(
+        stock_list=["AAPL"],
+        database_url="postgresql+psycopg://user:pass@db.example.com:5432/postgres",
+        database_path="./data/should_not_be_used.db",
+    )
+
+    assert cfg.get_db_url() == "postgresql+psycopg://user:pass@db.example.com:5432/postgres"
 
 
 def test_get_db_url_blank_database_url_falls_back_to_sqlite(tmp_path):

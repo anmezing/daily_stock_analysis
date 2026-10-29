@@ -81,6 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] GitHub Actions 每日分析改为美东开盘后 30 分钟触发（10:00 ET：夏令时北京 22:00、冬令时 23:00），避开开盘首分钟的价格噪声与尚未成型的量比/换手率。
 - [文档] 补充用 OpenRouter `:free` 模型替代付费 OpenAI 的配置方式（模型 ID 需带 `openai/` 前缀），并说明 OpenCode 免费模型不对外部客户端开放（HTTP 403）。
 - [改进] GitHub Actions 的 Gemini 调用节奏按免费档限流收紧：请求间隔 3s→7s（免费档约 10 RPM），重试次数 5→2，避免 429 时白等；同时说明免费额度按 Google Cloud 项目计，多 Key 需来自不同项目才能叠加。
+- [修复] 修复外部 PostgreSQL/Supabase 连接在新版 SQLAlchemy 下启动失败（`No module named 'psycopg'`）：`get_db_url()` 把裸 `postgresql://` 固定为 `postgresql+psycopg2://`（显式指定驱动的不改写），并将 SQLAlchemy 版本封顶 `<2.2`，避免默认驱动随上游版本漂移。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

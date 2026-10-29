@@ -2062,11 +2062,18 @@ class Config:
 
         为兼容常见云平台返回的连接串，若使用 `postgres://`
         前缀则自动规范化为 SQLAlchemy 更稳定的 `postgresql://`。
+
+        同时把「未指定驱动」的 PostgreSQL URL 固定为 psycopg2：
+        裸 `postgresql://` 使用哪个驱动取决于 SQLAlchemy 版本
+        （2.1 起默认 psycopg v3），而项目依赖只声明了 psycopg2-binary，
+        不写死会导致部署环境换一个 SQLAlchemy 版本就报 No module named 'psycopg'。
         """
         external_db_url = (self.database_url or "").strip()
         if external_db_url:
             if external_db_url.startswith("postgres://"):
                 external_db_url = "postgresql://" + external_db_url[len("postgres://"):]
+            if external_db_url.startswith("postgresql://"):
+                external_db_url = "postgresql+psycopg2://" + external_db_url[len("postgresql://"):]
             return external_db_url
 
         db_path = Path(self.database_path)

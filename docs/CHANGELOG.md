@@ -88,6 +88,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 Google News RSS 兜底搜索源：免注册、无 API Key、无额度上限，默认开启（`NEWS_RSS_ENABLED=false` 可关闭），避免所有付费搜索源同时失效时情报维度全空。
 - [改进] TwelveData 遇到 403/401 等套餐限制时不再重试三次，改为在进程内标记该接口 1 小时内不可用，减少每只股票约 3 秒的无谓等待。
 - [新功能] Tavily 新增 `TAVILY_BASE_URL` 配置，可指向 Tavily 风格 HTTP 中转（`{base}/search`）；未配置时仍走官方 SDK，行为不变。中转请求同时携带 `Authorization` 头与 body 中的 `api_key`，兼容无法自定义 Header 的实现。
+- [改进] 个股分析 Prompt 拆分为「公共约束 + 市场片段」：按标的市场只注入对应规则（A股/港股/美股），减少无关市场的规则干扰；新增"只用给定数据、缺失填 null、禁止编造"硬约束，统一各市场乖离率区间，并把筹码数据改为可选加分项（此前美港股无筹码数据导致评分无法达到"强烈买入"）。
+- [改进] 美股实时行情链路改为 Finnhub 优先（免费档提供实时报价），TwelveData 退居次位；日线链路顺序不变。
+- [改进] 美股/港股实时行情补充换手率：用成交量 ÷ 流通股本（缺失时退回总股本）计算，此前 yfinance/Finnhub/TwelveData 均不直接提供该字段。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。
 - [新功能] 移植上游 AlphaVantage 美股数据源（`ALPHAVANTAGE_API_KEY`，优先级 3），作为 Finnhub 之后的次级兜底；同样只在配置 Key 时注册并只在美股链路生效。

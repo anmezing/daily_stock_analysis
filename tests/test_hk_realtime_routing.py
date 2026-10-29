@@ -18,12 +18,14 @@ from data_provider.realtime_types import RealtimeSource, UnifiedRealtimeQuote
 
 
 class _DummyFetcher:
-    def __init__(self, name: str, priority: int, result=None, *, api_ready: bool = False):
+    def __init__(self, name: str, priority: int, result=None, *, api_ready: bool = False, supports_code=None):
         self.name = name
         self.priority = priority
         self.result = result
         self._api_ready = api_ready
         self.calls = []
+        if supports_code is not None:
+            self.supports_code = supports_code
 
     def get_realtime_quote(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -248,13 +250,73 @@ class TestHKRealtimeRouting(unittest.TestCase):
         quote = manager.get_realtime_quote("AAPL")
 
         self.assertIsNotNone(quote)
-        self.assertEqual(quote.source, RealtimeSource.TWELVEDATA)
+        # 美股实时链首位是 Finnhub（免费档提供实时报价），TwelveData 变为补充源
+        self.assertEqual(quote.source, RealtimeSource.FALLBACK)
         self.assertEqual(quote.pe_ratio, 28.0)
         self.assertEqual(quote.volume_ratio, 0.75)
         self.assertEqual(quote.turnover_rate, 1.62)
         self.assertEqual(len(finnhub.calls), 1)
+        self.assertEqual(len(twelvedata.calls), 1)
         self.assertEqual(len(alphavantage.calls), 1)
         self.assertEqual(yfinance.calls, [])
+
+
+
+
+class TestUSRealtimeOrdering(unittest.TestCase):
+    @patch("src.config.get_config")
+    def test_us_realtime_prefers_finnhub_but_daily_order_is_unchanged(self, mock_get_config):
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="tencent,akshare_sina,efinance,akshare_em,tushare",
+        )
+
+        twelve = _DummyFetcher("TwelveDataFetcher", 2, result=_DummyQuote(), api_ready=True)
+        finnhub = _DummyFetcher("FinnhubFetcher", 2, result=_DummyQuote(), api_ready=True)
+        yfinance = _DummyFetcher("YfinanceFetcher", 4, result=_DummyQuote())
+
+        manager = DataFetcherManager(fetchers=[yfinance, twelve, finnhub])
+
+        daily_chain = [f.name for f in manager._get_us_hk_priority_chain("AAPL")]
+        realtime_chain = [
+            f.name
+            for f in manager._prefer_realtime_source(
+                manager._get_us_hk_priority_chain("AAPL"), "FinnhubFetcher"
+            )
+        ]
+
+        # 日线仍然按优先级：TwelveData 的批量历史接口更合适
+        self.assertEqual(daily_chain[0], "TwelveDataFetcher")
+        # 实时行情把 Finnhub 提到最前（免费档提供美股实时报价）
+        self.assertEqual(realtime_chain[0], "FinnhubFetcher")
+        self.assertEqual(realtime_chain[-1], "YfinanceFetcher")
+
+    @patch("src.config.get_config")
+    def test_hk_realtime_chain_is_untouched(self, mock_get_config):
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="tencent,akshare_sina,efinance,akshare_em,tushare",
+        )
+
+        twelve = _DummyFetcher("TwelveDataFetcher", 2, result=_DummyQuote(), api_ready=True)
+        finnhub = _DummyFetcher(
+            "FinnhubFetcher",
+            2,
+            result=_DummyQuote(),
+            api_ready=True,
+            supports_code=lambda code: code.upper() == "AAPL",
+        )
+        yfinance = _DummyFetcher("YfinanceFetcher", 4, result=_DummyQuote())
+
+        manager = DataFetcherManager(fetchers=[yfinance, twelve, finnhub])
+        chain = [
+            f.name
+            for f in manager._prefer_realtime_source(
+                manager._get_us_hk_priority_chain("hk00700"), "FinnhubFetcher"
+            )
+        ]
+
+        self.assertEqual(chain, ["TwelveDataFetcher", "YfinanceFetcher"])
 
 
 if __name__ == "__main__":

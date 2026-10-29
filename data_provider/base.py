@@ -1013,6 +1013,15 @@ class DataFetcherManager:
         return self._dedupe_fetchers(api_fetchers + yfinance_fetchers)
 
     @staticmethod
+    def _prefer_realtime_source(fetchers: List[BaseFetcher], preferred_name: str) -> List[BaseFetcher]:
+        """把指定数据源提到实时链路首位（其余顺序不变）。"""
+        preferred = [f for f in fetchers if f.name == preferred_name]
+        if not preferred:
+            return fetchers
+        rest = [f for f in fetchers if f.name != preferred_name]
+        return preferred + rest
+
+    @staticmethod
     def _fetcher_supports_code(fetcher: BaseFetcher, stock_code: str) -> bool:
         """数据源声明了 supports_code 时按其能力过滤，否则视为通用。"""
         supports = getattr(fetcher, "supports_code", None)
@@ -1306,8 +1315,11 @@ class DataFetcherManager:
             )
 
         # 美股个股使用 API 优先链，Yfinance 永远最后兜底。
+        # 实时报价优先 Finnhub：其免费档提供美股实时行情，其余源在免费档多为延迟数据。
         if _is_us_code(stock_code):
-            us_fetchers = self._get_us_hk_priority_chain(stock_code)
+            us_fetchers = self._prefer_realtime_source(
+                self._get_us_hk_priority_chain(stock_code), "FinnhubFetcher"
+            )
             return self._get_realtime_quote_from_fetcher_chain(
                 stock_code,
                 us_fetchers,

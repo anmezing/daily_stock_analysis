@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - optional dependency
 from src.agent.llm_adapter import get_thinking_extra_body
 from src.config import Config, get_config, get_api_keys_for_model, extra_litellm_params, get_configured_llm_models
 from src.core.llm_rate_limiter import get_llm_rate_limiter, get_rate_limit_bucket
+from src.core.signal_semantics import infer_signal
 from src.core.trading_calendar import get_market_for_stock
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
@@ -95,12 +96,10 @@ def _signal_from_operation_advice(value: Any) -> str:
     text = value.strip()
     if not text:
         return ""
-    if any(keyword in text for keyword in ("买入", "加仓", "做多")):
-        return "buy"
-    if any(keyword in text for keyword in ("卖出", "减仓", "止盈", "止损")):
-        return "sell"
-    if any(keyword in text for keyword in ("持有", "观望", "等待")):
-        return "hold"
+    # 与回测共用同一份词表（src/core/signal_semantics.py），避免两套关键词错位
+    signal = infer_signal(text)
+    if signal:
+        return signal
     return _canonical_decision_signal(text)
 
 
@@ -1128,12 +1127,20 @@ class GeminiAnalyzer:
 
 评分依据「趋势 + 入场位置 + 量能 + 催化 + 风险」，任何单一指标都不得单独封顶或否决：
 
-| 分值 | 条件 |
-|---|---|
-| 80-100 强烈买入 | 趋势确认（见市场规则）＋ 入场位处于安全区 ＋ 量能配合 ＋ 有明确催化 ＋ 无重大风险 |
-| 60-79 买入 | 趋势成立但催化一般，或入场位略偏离安全区；允许一项次要条件不满足 |
-| 40-59 观望 | 趋势不明、乖离率进入警戒区、量能不足，或存在待消化的风险事件 |
-| 0-39 卖出/减仓 | 空头排列、关键趋势位被破坏、放量下跌，或重大利空 |
+| 分值 | `operation_advice` | 条件 |
+|---|---|---|
+| 80-100 | 买入 / 加仓（强烈） | 趋势确认（见市场规则）＋ 入场位处于安全区 ＋ 量能配合 ＋ 有明确催化 ＋ 无重大风险 |
+| 60-79 | 买入 / 加仓 | 趋势成立但催化一般，或入场位略偏离安全区；允许一项次要条件不满足 |
+| 40-59 | 持有 / 观望 | 趋势不明、乖离率进入警戒区、量能不足，或存在待消化的风险事件 |
+| 0-39 | 减仓 / 卖出 / 清仓 | 空头排列、关键趋势位被破坏、放量下跌，或重大利空 |
+
+`持有` 与 `观望` 的区别（必须分清）：
+
+- **持有**：已有仓位、继续拿着，倾向 `not_down`（允许波动，但不该显著下跌）。
+- **观望**：空仓等待，倾向 `not_up`（不追高，避免在风险位置进场）。
+
+`减仓` / `止盈` / `止损` 属于**仓位管理**，不等于看空：它们表达的是"降低暴露"，不是"预期下跌"。
+只有 `卖出` / `清仓` 才表达明确的看空判断。
 
 补充约束：
 

@@ -319,7 +319,7 @@ class BacktestResult(Base):
     stock_return_pct = Column(Float)
 
     # 方向与结果
-    direction_expected = Column(String(16))  # up/down/flat/not_down
+    direction_expected = Column(String(16))  # up/down/not_down/not_up/flat
     direction_correct = Column(Boolean, nullable=True)
     outcome = Column(String(16))  # win/loss/neutral
 

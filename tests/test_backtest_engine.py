@@ -67,9 +67,9 @@ class BacktestEngineTestCase(unittest.TestCase):
         self.assertEqual(res["simulated_return_pct"], 0.0)
         self.assertEqual(res["first_hit"], "not_applicable")
 
-    def test_wait_maps_to_cash_and_flat_direction(self):
+    def test_wait_is_scored_as_avoiding_a_rally_not_as_flat(self):
+        """观望/减仓属于仓位管理：下跌时应记为防守成功，而不是判失败。"""
         cfg = EvaluationConfig(eval_window_days=3, neutral_band_pct=2.0)
-        # Stock drops ~5%: AI said wait (neutral), stock moved significantly → loss
         bars = self._bars(date(2024, 1, 1), [98, 96, 95], highs=[99, 97, 96], lows=[97, 95, 94])
         res = BacktestEngine.evaluate_single(
             operation_advice="观望",
@@ -81,7 +81,24 @@ class BacktestEngineTestCase(unittest.TestCase):
             config=cfg,
         )
         self.assertEqual(res["position_recommendation"], "cash")
-        self.assertEqual(res["direction_expected"], "flat")
+        self.assertEqual(res["direction_expected"], "not_up")
+        # 股价跌了 5%，空仓等于避免了亏损
+        self.assertEqual(res["outcome"], "win")
+        self.assertTrue(res["direction_correct"])
+
+    def test_wait_loses_when_stock_rallies(self):
+        cfg = EvaluationConfig(eval_window_days=3, neutral_band_pct=2.0)
+        bars = self._bars(date(2024, 1, 1), [103, 105, 106], highs=[104, 106, 107], lows=[102, 104, 105])
+        res = BacktestEngine.evaluate_single(
+            operation_advice="观望",
+            analysis_date=date(2024, 1, 1),
+            start_price=100,
+            forward_bars=bars,
+            stop_loss=None,
+            take_profit=None,
+            config=cfg,
+        )
+        self.assertEqual(res["direction_expected"], "not_up")
         self.assertEqual(res["outcome"], "loss")
 
     def test_hold_win_when_flat(self):

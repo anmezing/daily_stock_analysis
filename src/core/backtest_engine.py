@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence
 
+from src.core.signal_semantics import infer_direction, infer_position
+
 
 OVERALL_SENTINEL_CODE = "__overall__"
-EXECUTION_LOGIC_REVISION = "x2"
+EXECUTION_LOGIC_REVISION = "x3"
 
 
 class DailyBarLike(Protocol):
@@ -93,30 +95,16 @@ class BacktestEngine:
 
     @classmethod
     def infer_direction_expected(cls, operation_advice: Optional[str]) -> str:
-        """Infer expected direction: up/down/not_down/flat."""
-        text = cls._normalize_text(operation_advice)
-        if cls._matches_intent(text, cls._BEARISH_KEYWORDS):
-            return "down"
-        if cls._matches_intent(text, cls._WAIT_KEYWORDS):
-            return "flat"
-        if cls._matches_intent(text, cls._BULLISH_KEYWORDS):
-            return "up"
-        if cls._matches_intent(text, cls._HOLD_KEYWORDS):
-            return "not_down"
-        return "flat"
+        """Infer expected direction: up/down/not_down/not_up/flat.
+
+        词表与 analyzer 共用 ``signal_semantics``，避免两套关键词互相错位。
+        """
+        return infer_direction(operation_advice)
 
     @classmethod
     def infer_position_recommendation(cls, operation_advice: Optional[str]) -> str:
-        """Infer recommended position: long/cash (long-only system).
-
-        Priority: bearish/wait -> cash, bullish/hold -> long, unrecognized -> cash.
-        """
-        text = cls._normalize_text(operation_advice)
-        if cls._matches_intent(text, cls._BEARISH_KEYWORDS) or cls._matches_intent(text, cls._WAIT_KEYWORDS):
-            return "cash"
-        if cls._matches_intent(text, cls._BULLISH_KEYWORDS) or cls._matches_intent(text, cls._HOLD_KEYWORDS):
-            return "long"
-        return "cash"
+        """Infer recommended position: long/cash (long-only system)."""
+        return infer_position(operation_advice)
 
     @classmethod
     def evaluate_single(
@@ -606,6 +594,15 @@ class BacktestEngine:
             if r >= 0:
                 return "win", True
             if r <= -band:
+                return "loss", False
+            return "neutral", None
+
+        if direction_expected == "not_up":
+            # 减仓/止盈/止损/观望属于仓位管理：只要没继续大涨就算防守成功，
+            # 不能再用"必须横盘"去判它失败。
+            if r <= 0:
+                return "win", True
+            if r >= band:
                 return "loss", False
             return "neutral", None
 

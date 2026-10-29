@@ -12,7 +12,7 @@ import unittest
 from datetime import date, datetime
 
 from src.config import Config
-from src.core.backtest_engine import OVERALL_SENTINEL_CODE
+from src.core.backtest_engine import EXECUTION_LOGIC_REVISION, OVERALL_SENTINEL_CODE
 from src.services.backtest_service import BacktestService
 from src.storage import AnalysisHistory, BacktestResult, BacktestSummary, DatabaseManager, StockDaily
 
@@ -119,7 +119,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                     analysis_history_id=history.id,
                     code=history.code,
                     eval_window_days=3,
-                    engine_version="v1@no-x2",
+                    engine_version=f"v1@no-{EXECUTION_LOGIC_REVISION}",
                     eval_status="insufficient_data",
                     evaluated_at=datetime.now(),
                 )
@@ -151,7 +151,13 @@ class BacktestServiceTestCase(unittest.TestCase):
                 row.engine_version
                 for row in session.query(BacktestResult).order_by(BacktestResult.engine_version).all()
             }
-        self.assertEqual(versions, {"v1@ac-x2", "v1@no-x2"})
+        self.assertEqual(
+            versions,
+            {
+                f"v1@ac-{EXECUTION_LOGIC_REVISION}",
+                f"v1@no-{EXECUTION_LOGIC_REVISION}",
+            },
+        )
 
     def _run_and_get_result(self) -> BacktestResult:
         """Helper: run backtest and return the single BacktestResult row."""
@@ -165,7 +171,7 @@ class BacktestServiceTestCase(unittest.TestCase):
         result = self._run_and_get_result()
 
         self.assertEqual(result.eval_status, "completed")
-        self.assertEqual(result.engine_version, "v1@no-x2")
+        self.assertEqual(result.engine_version, f"v1@no-{EXECUTION_LOGIC_REVISION}")
         self.assertEqual(result.code, "600519")
         self.assertEqual(result.analysis_date, date(2024, 1, 1))
         self.assertEqual(result.operation_advice, "买入")

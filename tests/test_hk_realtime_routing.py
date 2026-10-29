@@ -210,6 +210,52 @@ class TestHKRealtimeRouting(unittest.TestCase):
         self.assertEqual(longbridge.calls, [(("AAPL",), {})])
         self.assertEqual(yfinance.calls, [])
 
+    @patch("src.config.get_config")
+    def test_manager_keeps_supplementing_after_partial_fill(self, mock_get_config):
+        """第二个源只补到一部分字段时，仍允许再问第三个源。"""
+        mock_get_config.return_value = SimpleNamespace(
+            enable_realtime_quote=True,
+            realtime_source_priority="tencent,akshare_sina,efinance,akshare_em,tushare",
+        )
+
+        twelvedata = _DummyFetcher(
+            "TwelveDataFetcher",
+            2,
+            result=_make_quote(code="AAPL", source=RealtimeSource.TWELVEDATA, price=201.23),
+            api_ready=True,
+        )
+        finnhub = _DummyFetcher(
+            "FinnhubFetcher",
+            2,
+            result=_make_quote(code="AAPL", source=RealtimeSource.FALLBACK, price=201.23, pe_ratio=28.0),
+            api_ready=True,
+        )
+        alphavantage = _DummyFetcher(
+            "AlphaVantageFetcher",
+            3,
+            result=_make_quote(
+                code="AAPL",
+                source=RealtimeSource.FALLBACK,
+                price=201.23,
+                volume_ratio=0.75,
+                turnover_rate=1.62,
+            ),
+            api_ready=True,
+        )
+        yfinance = _DummyFetcher("YfinanceFetcher", 0, result=_DummyQuote())
+
+        manager = DataFetcherManager(fetchers=[twelvedata, finnhub, alphavantage, yfinance])
+        quote = manager.get_realtime_quote("AAPL")
+
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.source, RealtimeSource.TWELVEDATA)
+        self.assertEqual(quote.pe_ratio, 28.0)
+        self.assertEqual(quote.volume_ratio, 0.75)
+        self.assertEqual(quote.turnover_rate, 1.62)
+        self.assertEqual(len(finnhub.calls), 1)
+        self.assertEqual(len(alphavantage.calls), 1)
+        self.assertEqual(yfinance.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

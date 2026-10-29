@@ -902,6 +902,18 @@ class DataFetcherManager:
             if not hasattr(fetcher, 'get_realtime_quote'):
                 continue
 
+            # 预算在调用前判断：超限时不再发起请求，避免多打一次网络再丢弃结果。
+            if (
+                primary_quote is not None
+                and supplement_attempts >= self._MAX_QUOTE_SUPPLEMENT_ATTEMPTS
+            ):
+                logger.debug(
+                    "[实时行情] %s %s 补充尝试已达上限，停止继续",
+                    market_label,
+                    stock_code,
+                )
+                break
+
             try:
                 quote = fetcher.get_realtime_quote(stock_code)
                 if quote is not None and quote.has_basic_data():
@@ -922,13 +934,6 @@ class DataFetcherManager:
                         )
                     else:
                         supplement_attempts += 1
-                        if supplement_attempts > 1:
-                            logger.debug(
-                                "[实时行情] %s %s 补充尝试已达上限，停止继续",
-                                market_label,
-                                stock_code,
-                            )
-                            break
                         merged = self._merge_quote_fields(primary_quote, quote)
                         if merged:
                             logger.info(
@@ -1437,6 +1442,10 @@ class DataFetcherManager:
         'pe_ratio', 'pb_ratio', 'total_mv', 'circ_mv',
         'amplitude',
     ]
+
+    # 主源之后最多再向几个数据源补字段。设为 1 时，只要第二个源也没这个字段，
+    # 后面本来能提供的源（例如只有 Yfinance 有 volume_ratio）就永远问不到。
+    _MAX_QUOTE_SUPPLEMENT_ATTEMPTS = 2
 
     @classmethod
     def _quote_needs_supplement(cls, quote) -> bool:

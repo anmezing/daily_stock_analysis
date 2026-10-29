@@ -53,6 +53,21 @@ import os
 logger = logging.getLogger(__name__)
 
 
+def _positive_float_or_none(value) -> float | None:
+    """把 yfinance info 里的估值字段转成 float；缺失或非正数视为无数据。
+
+    PE/PB 为 0 或负数时在业务上没有估值含义（负 PE 代表亏损），
+    统一返回 None，避免把 0 当成"真实估值"下发到报告。
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in (float("inf"), float("-inf")):  # NaN / inf
+        return None
+    return number if number > 0 else None
+
+
 class YfinanceFetcher(BaseFetcher):
     """
     Yahoo Finance 数据源实现
@@ -859,13 +874,18 @@ class YfinanceFetcher(BaseFetcher):
             if high is not None and low is not None and prev_close is not None and prev_close > 0:
                 amplitude = ((high - low) / prev_close) * 100
 
-            # 获取股票名称
+            # 获取股票名称与估值字段（ticker.info 只取一次，避免重复请求）
+            pe_ratio = None
+            pb_ratio = None
             try:
-                info_name = ticker.info.get('longName', '') or ticker.info.get('shortName', '') or ''
+                info_dict = ticker.info or {}
+                info_name = info_dict.get('longName', '') or info_dict.get('shortName', '') or ''
                 if is_meaningful_stock_name(info_name, normalized_code):
                     name = info_name
                 else:
                     name = STOCK_NAME_MAP.get(normalized_code, '') or STOCK_NAME_MAP.get(symbol, '')
+                pe_ratio = _positive_float_or_none(info_dict.get('trailingPE'))
+                pb_ratio = _positive_float_or_none(info_dict.get('priceToBook'))
             except Exception:
                 name = STOCK_NAME_MAP.get(normalized_code, '') or STOCK_NAME_MAP.get(symbol, '')
 
@@ -885,8 +905,8 @@ class YfinanceFetcher(BaseFetcher):
                 high=high,
                 low=low,
                 pre_close=prev_close,
-                pe_ratio=None,
-                pb_ratio=None,
+                pe_ratio=pe_ratio,
+                pb_ratio=pb_ratio,
                 total_mv=market_cap,
                 circ_mv=None,
             )

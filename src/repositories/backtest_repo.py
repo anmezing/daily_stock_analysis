@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, delete, desc, func, select
 
@@ -23,6 +23,46 @@ class BacktestRepository:
 
     def __init__(self, db_manager: Optional[DatabaseManager] = None):
         self.db = db_manager or DatabaseManager.get_instance()
+
+    _PLACEHOLDER_ADVICES = {"", "待补充", "仅拉取数据", "未分析"}
+
+    @staticmethod
+    def _is_evaluable(analysis: AnalysisHistory) -> bool:
+        """Return True only for analyses that carry a real, structured LLM verdict.
+
+        Placeholder rows (LLM key missing), degraded keyword-only parses and
+        "待补充" advisories must never enter direction accuracy or win rate:
+        they have no model_used and no structured conclusion, so counting them
+        silently drags every metric toward the placeholder "持有/震荡/50".
+        """
+        raw = getattr(analysis, "raw_result", None)
+        payload: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            payload = raw
+        elif isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError):
+                payload = {}
+
+        if not str(payload.get("model_used") or "").strip():
+            return False
+        if payload.get("success") is False:
+            return False
+        if str(payload.get("parse_mode") or "structured").strip().lower() in {
+            "text_fallback",
+            "truncated",
+        }:
+            return False
+
+        advice = str(
+            getattr(analysis, "operation_advice", "")
+            or payload.get("operation_advice")
+            or ""
+        ).strip()
+        return advice not in BacktestRepository._PLACEHOLDER_ADVICES
 
     def get_candidates(
         self,
@@ -56,7 +96,36 @@ class BacktestRepository:
 
             query = query.order_by(desc(AnalysisHistory.created_at)).limit(limit)
             rows = session.execute(query).scalars().all()
-            return list(rows)
+
+        evaluable = [row for row in rows if self._is_evaluable(row)]
+        skipped = len(rows) - len(evaluable)
+        if skipped:
+            logger.info(
+                "回测跳过 %s 条占位/降级分析记录（无 model_used、解析失败或待补充）",
+                skipped,
+            )
+
+        # 同一天同一只股票可能被手动/定时重复分析多次，结论和收益完全相同。
+        # 全部计入会让某一天在统计里被重复加权（还可能是同一天里矛盾的结论）。
+        # rows 已按 created_at 倒序，保留每天最新的一条。
+        deduped: List[AnalysisHistory] = []
+        seen: set = set()
+        for row in evaluable:
+            signal_day = self.parse_analysis_date_from_snapshot(
+                getattr(row, "context_snapshot", None)
+            ) or (row.created_at.date() if getattr(row, "created_at", None) else None)
+            key = (getattr(row, "code", None), signal_day)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+
+        if len(deduped) != len(evaluable):
+            logger.info(
+                "回测跳过 %s 条同一信号日的重复分析",
+                len(evaluable) - len(deduped),
+            )
+        return deduped
 
     def save_result(self, result: BacktestResult) -> None:
         with self.db.get_session() as session:
@@ -166,6 +235,9 @@ class BacktestRepository:
                     "loss_count",
                     "neutral_count",
                     "direction_accuracy_pct",
+                    "raw_direction_accuracy_pct",
+                    "calibration_lift_pct",
+                    "calibration_sample_count",
                     "win_rate_pct",
                     "neutral_rate_pct",
                     "avg_stock_return_pct",
@@ -223,10 +295,15 @@ class BacktestRepository:
             return None
 
         enhanced = payload.get("enhanced_context")
-        if not isinstance(enhanced, dict):
-            return None
-
-        date_str = enhanced.get("date")
+        if isinstance(enhanced, dict):
+            date_str = enhanced.get("date")
+        else:
+            date_str = None
+        if not date_str:
+            # Agent 链路保存的是 initial_context，没有 enhanced_context，
+            # 但会显式带上 analysis_date；缺少它就只能退回到 created_at，
+            # 而 created_at 是服务器本地时间，跨时区时会错一天。
+            date_str = payload.get("analysis_date") or payload.get("date")
         if not date_str:
             return None
 

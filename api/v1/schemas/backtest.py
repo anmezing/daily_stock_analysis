@@ -34,6 +34,14 @@ class BacktestResultItem(BaseModel):
     evaluated_at: Optional[str] = None
     operation_advice: Optional[str] = None
     position_recommendation: Optional[str] = None
+    raw_operation_advice: Optional[str] = Field(None, description="校准前的原始建议，用于归因对比")
+    raw_direction_expected: Optional[str] = None
+    raw_direction_correct: Optional[bool] = None
+    calibration_arm_operation_advice: Optional[str] = Field(
+        None, description="校准器给出的建议（暂停时也记录，作为影子对照）"
+    )
+    calibration_arm_direction_expected: Optional[str] = None
+    calibration_arm_direction_correct: Optional[bool] = None
     start_price: Optional[float] = None
     end_close: Optional[float] = None
     max_high: Optional[float] = None
@@ -81,6 +89,15 @@ class PerformanceMetrics(BaseModel):
 
     direction_accuracy_pct: Optional[float] = Field(
         None, description="方向准确率：全部已完成记录，按窗口末涨跌判定"
+    )
+    raw_direction_accuracy_pct: Optional[float] = Field(
+        None, description="校准前原始判断的方向准确率"
+    )
+    calibration_lift_pct: Optional[float] = Field(
+        None, description="校准提升（百分点）= 校准建议准确率 − 原始判断准确率；<=0 时自动暂停应用校准"
+    )
+    calibration_sample_count: int = Field(
+        0, description="校准器会改变方向结论、且前后都有回测结论的样本数（暂停期间也记录影子对照）"
     )
     win_rate_pct: Optional[float] = Field(
         None, description="执行胜率：仅统计 long 仓位的模拟成交结果，不含现金信号与中性"

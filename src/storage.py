@@ -308,6 +308,16 @@ class BacktestResult(Base):
     operation_advice = Column(String(20))
     position_recommendation = Column(String(8))  # long/cash
 
+    # 校准前的原始判断：用于对比"校准到底有没有提升准确率"
+    raw_operation_advice = Column(String(20))
+    raw_direction_expected = Column(String(16))
+    raw_direction_correct = Column(Boolean, nullable=True)
+
+    # 校准器会给出的建议（暂停时也记录），作为影子对照
+    calibration_arm_operation_advice = Column(String(20))
+    calibration_arm_direction_expected = Column(String(16))
+    calibration_arm_direction_correct = Column(Boolean, nullable=True)
+
     # 策略关联（从 AnalysisHistory 冗余，便于 strategy 维度聚合）
     strategy_id = Column(String(64), index=True)
 
@@ -361,6 +371,12 @@ class BacktestResult(Base):
             "evaluated_at": self.evaluated_at.isoformat() if self.evaluated_at else None,
             "operation_advice": self.operation_advice,
             "position_recommendation": self.position_recommendation,
+            "raw_operation_advice": self.raw_operation_advice,
+            "raw_direction_expected": self.raw_direction_expected,
+            "raw_direction_correct": self.raw_direction_correct,
+            "calibration_arm_operation_advice": self.calibration_arm_operation_advice,
+            "calibration_arm_direction_expected": self.calibration_arm_direction_expected,
+            "calibration_arm_direction_correct": self.calibration_arm_direction_correct,
             "strategy_id": self.strategy_id,
             "start_price": self.start_price,
             "end_close": self.end_close,
@@ -411,6 +427,10 @@ class BacktestSummary(Base):
 
     # 准确率/胜率
     direction_accuracy_pct = Column(Float)
+    # 校准前原始判断的方向准确率，以及校准带来的提升（百分点）
+    raw_direction_accuracy_pct = Column(Float)
+    calibration_lift_pct = Column(Float)
+    calibration_sample_count = Column(Integer, default=0)
     win_rate_pct = Column(Float)
     neutral_rate_pct = Column(Float)
 
@@ -844,7 +864,20 @@ class DatabaseManager:
         """Apply small compatibility migrations missed by SQLAlchemy create_all."""
         additive_columns = {
             "analysis_history": [("strategy_id", "VARCHAR(64)")],
-            "backtest_results": [("strategy_id", "VARCHAR(64)")],
+            "backtest_results": [
+                ("strategy_id", "VARCHAR(64)"),
+                ("raw_operation_advice", "VARCHAR(20)"),
+                ("raw_direction_expected", "VARCHAR(16)"),
+                ("raw_direction_correct", "BOOLEAN"),
+                ("calibration_arm_operation_advice", "VARCHAR(20)"),
+                ("calibration_arm_direction_expected", "VARCHAR(16)"),
+                ("calibration_arm_direction_correct", "BOOLEAN"),
+            ],
+            "backtest_summaries": [
+                ("raw_direction_accuracy_pct", "FLOAT"),
+                ("calibration_lift_pct", "FLOAT"),
+                ("calibration_sample_count", "INTEGER"),
+            ],
         }
         indexes = {
             "analysis_history": [("ix_analysis_history_strategy_id", "strategy_id")],
@@ -1741,10 +1774,13 @@ class DatabaseManager:
         # 注意：这里的均线形态判断基于“close/ma5/ma10/ma20”静态比较，
         # 未考虑均线拐点、斜率、或不同数据源复权口径差异。
         # 该行为目前保留（按需求不改逻辑）。
-        close = data.close or 0
-        ma5 = data.ma5 or 0
-        ma10 = data.ma10 or 0
-        ma20 = data.ma20 or 0
+        if data.close is None or data.ma5 is None or data.ma10 is None or data.ma20 is None:
+            # 缺失时不能落进“震荡整理”：那会让模型以为已经确认了盘整
+            return "数据不足，无法判断 ↔️"
+        close = data.close
+        ma5 = data.ma5
+        ma10 = data.ma10
+        ma20 = data.ma20
         
         if close > ma5 > ma10 > ma20 > 0:
             return "多头排列 📈"

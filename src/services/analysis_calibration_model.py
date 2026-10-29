@@ -19,6 +19,7 @@ import math
 import pickle
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -195,6 +196,44 @@ class SmallCalibrationModel:
             preferred_backend=actual_backend,
         )
 
+    @staticmethod
+    def _split_by_date(
+        samples: Sequence[Dict[str, Any]],
+        *,
+        train_ratio: float = 0.7,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """按信号日切分训练/验证集，并在中间留出隔离期。
+
+        标签是 N 日前向收益，相邻信号日的窗口高度重叠。若按样本序号切分，
+        验证集会与训练集共享同一段行情，准确率必然虚高。这里改为：
+        训练集 = 截止到某日；验证集 = 该日 + 窗口长度之后，中间整段丢弃。
+        """
+        dated = [
+            (str(sample.get("analysis_date") or ""), sample) for sample in samples
+        ]
+        dates = sorted({day for day, _ in dated if day})
+        if len(dates) < 3:
+            return [], []
+
+        window_days = max(
+            (int(sample.get("window_days") or 0) for sample in samples), default=0
+        ) or 10
+
+        split_at = max(1, int(len(dates) * train_ratio))
+        split_at = min(split_at, len(dates))
+        split_day = dates[split_at - 1]
+        try:
+            cutoff = datetime.strptime(split_day, "%Y-%m-%d").date() + timedelta(
+                days=window_days
+            )
+            cutoff_str = cutoff.isoformat()
+        except (TypeError, ValueError):
+            return [], []
+
+        train = [sample for day, sample in dated if day and day <= split_day]
+        validation = [sample for day, sample in dated if day and day > cutoff_str]
+        return train, validation
+
     @classmethod
     def _fit_scope_model(
         cls,
@@ -207,10 +246,10 @@ class SmallCalibrationModel:
             return None
 
         ordered = list(samples)
-        split_index = int(len(ordered) * 0.8) if len(ordered) >= 20 else len(ordered)
-        split_index = max(1, min(split_index, len(ordered)))
-        train_samples = ordered[:split_index]
-        validation_samples = ordered[split_index:]
+        train_samples, validation_samples = cls._split_by_date(ordered)
+        # 没有干净的验证集就不出模型：宁可不用，也不要给一个无法验证准确度的模型
+        if len(train_samples) < 10 or len(validation_samples) < 5:
+            return None
 
         labels = sorted(
             {
@@ -220,17 +259,8 @@ class SmallCalibrationModel:
             }
         )
         if len(labels) < 2:
-            labels = sorted(
-                {
-                    str(sample.get("label") or "").strip().lower()
-                    for sample in ordered
-                    if str(sample.get("label") or "").strip()
-                }
-            )
-            if len(labels) < 2:
-                return None
-            train_samples = ordered
-            validation_samples = []
+            # 训练集单一类别，没有可学的判别边界
+            return None
 
         backend = cls._resolve_backend(
             preferred_backend=preferred_backend,

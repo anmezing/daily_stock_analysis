@@ -74,6 +74,13 @@ class SignalStats:
     samples: int = 0
     accuracy: float = 0.5
     avg_return: float = 0.0
+    # 该方向在同一批样本里的自然发生率（上涨/下跌/非上涨）。
+    # accuracy 减去 base_rate 才是"信号本身"的增量，跨信号直接比 accuracy 没有意义。
+    base_rate: float = 0.0
+
+    @property
+    def skill(self) -> float:
+        return self.accuracy - self.base_rate
 
 
 @dataclass
@@ -85,9 +92,14 @@ class CalibrationProfile:
     samples: int = 0
     threshold: int = _DEFAULT_MIN_SAMPLES
     current_signal: str = "hold"
+    # 校准前的原始结论：训练学习模型、双轨回测都要用它
+    original_score: int = 50
+    original_trend: str = ""
+    original_advice: str = ""
     current_signal_stats: Optional[SignalStats] = None
     best_alternative_stats: Optional[SignalStats] = None
     suggested_signal: Optional[str] = None
+    paused: bool = False
     score_adjustment: int = 0
     applied: bool = False
     reason: str = ""
@@ -97,13 +109,27 @@ class CalibrationProfile:
 
     def to_dict(self) -> Dict[str, Any]:
         payload = asdict(self)
-        if self.current_signal_stats is not None:
-            payload["current_signal_stats"] = asdict(self.current_signal_stats)
-        if self.best_alternative_stats is not None:
-            payload["best_alternative_stats"] = asdict(self.best_alternative_stats)
+        for key, stats in (
+            ("current_signal_stats", self.current_signal_stats),
+            ("best_alternative_stats", self.best_alternative_stats),
+        ):
+            if stats is not None:
+                stats_payload = asdict(stats)
+                stats_payload["skill"] = round(stats.skill, 4)
+                payload[key] = stats_payload
         if self.model_prediction is not None:
             payload["model_prediction"] = dict(self.model_prediction)
         return payload
+
+
+def _median(values: List[float]) -> float:
+    """中位数（不引入 numpy 依赖）。"""
+    ordered = sorted(values)
+    size = len(ordered)
+    middle = size // 2
+    if size % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
 class AnalysisCalibrationService:
@@ -122,6 +148,8 @@ class AnalysisCalibrationService:
         self._last_refresh_ts = 0.0
         self._small_model = self._load_small_model()
         self._last_model_train_ts = self._small_model.trained_at_ts if self._small_model else 0.0
+        # (timestamp, lift_pct, completed_count) 缓存，避免每只股票都查一次汇总
+        self._lift_guard_cache: Optional[tuple] = None
 
     @property
     def enabled(self) -> bool:
@@ -335,6 +363,41 @@ class AnalysisCalibrationService:
             },
         }
 
+    def _calibration_is_helping(self) -> bool:
+        """Return False when backtests show calibration is not beating the raw signal.
+
+        The guard is intentionally conservative: no summary / too few samples /
+        query failure all keep calibration enabled (fail-open), because the
+        first weeks have no attributable data yet.
+        """
+        ttl_seconds = 600
+        now = self._time_fn()
+        cached = self._lift_guard_cache
+        if cached and now - cached[0] < ttl_seconds:
+            return bool(cached[1])
+
+        helping = True
+        try:
+            summary = BacktestService(self.db).get_summary(scope="overall", code=None)
+        except Exception as exc:
+            logger.debug("[LearningLoop] 读取校准归因失败，保持启用: %s", exc)
+            summary = None
+
+        if summary:
+            lift = summary.get("calibration_lift_pct")
+            paired = int(summary.get("calibration_sample_count") or 0)
+            if lift is not None and paired >= self.min_samples:
+                helping = float(lift) > 0
+                if not helping:
+                    logger.info(
+                        "[LearningLoop] 校准未跑赢原始判断（lift=%s, n=%s），暂停应用校准（继续记录影子建议）",
+                        lift,
+                        paired,
+                    )
+
+        self._lift_guard_cache = (now, helping)
+        return helping
+
     def calibrate_result(self, result: Any, context_snapshot: Optional[Dict[str, Any]] = None) -> Any:
         """Calibrate one AnalysisResult in-place and return it."""
         if not self.enabled or result is None or not getattr(result, "success", True):
@@ -343,6 +406,10 @@ class AnalysisCalibrationService:
         decision_type = str(getattr(result, "decision_type", "") or "").strip().lower()
         if decision_type not in {"buy", "hold", "sell"}:
             decision_type = _signal_from_operation_advice(getattr(result, "operation_advice", ""))
+
+        # 即使暂停，也继续计算"校准器会怎么改"并写入 calibration_info：
+        # 回测会把这条建议当作影子对照，等它重新跑赢原始判断后可以自动恢复。
+        helping = self._calibration_is_helping()
 
         profile = self._build_profile(
             stock_code=str(getattr(result, "code", "") or "").strip(),
@@ -353,6 +420,20 @@ class AnalysisCalibrationService:
             context_snapshot=context_snapshot,
             strategy_id=getattr(result, "strategy_id", None),
         )
+        # 记录校准前的分数/趋势/建议，供学习与双轨回测区分原始判断
+        profile.original_score = int(getattr(result, "sentiment_score", 50) or 50)
+        profile.original_trend = str(getattr(result, "trend_prediction", "") or "").strip()
+        profile.original_advice = str(getattr(result, "operation_advice", "") or "").strip()
+
+        if not helping:
+            profile.paused = True
+            profile.applied = False
+            profile.reason = (
+                f"{profile.reason} 校准整体未跑赢原始判断，已暂停（仅记录影子建议）。"
+            ).strip()
+            result.calibration_info = profile.to_dict()
+            return result
+
         result.calibration_info = profile.to_dict()
 
         if not profile.applied or not profile.suggested_signal:
@@ -407,6 +488,7 @@ class AnalysisCalibrationService:
         note = (
             f"回测校准：基于{profile.source_scope}近{profile.samples}笔样本，"
             f"{original_signal}历史准确率约{profile.current_signal_stats.accuracy * 100:.0f}%"
+            f"（同口径市场基准{profile.current_signal_stats.base_rate * 100:.0f}%）"
             if profile.current_signal_stats
             else f"回测校准：基于{profile.source_scope}历史样本调整本次信号。"
         )
@@ -602,6 +684,10 @@ class AnalysisCalibrationService:
         if not self.model_enabled or self._small_model is None:
             return None
 
+        # 没有验证集就不能说明模型有泛化能力，直接不应用
+        if self._small_model.validation_accuracy is None:
+            return None
+
         if (
             self._small_model.validation_accuracy is not None
             and self._small_model.validation_count >= 12
@@ -673,18 +759,43 @@ class AnalysisCalibrationService:
         }
 
     def _build_training_samples(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        ordered_rows = sorted(rows, key=lambda item: float(item.get("evaluated_at_ts") or 0.0))
+        # 按信号日排序：批量重跑回测后 evaluated_at 会全部相同，
+        # 用它排序会让"时间切分"退化成随机切分。
+        ordered_rows = sorted(
+            rows,
+            key=lambda item: (
+                str(item.get("analysis_date") or ""),
+                float(item.get("evaluated_at_ts") or 0.0),
+            ),
+        )
+
+        # 横截面中位数作为"市场基准"的替代：同一信号日所有标的的收益中位数。
+        # 用它做超额收益标签，可以抵掉大盘涨跌，避免牛市里几乎全是 buy。
+        returns_by_date: Dict[str, List[float]] = {}
+        for row in ordered_rows:
+            day = str(row.get("analysis_date") or "")
+            ret = row.get("stock_return_pct")
+            if day and ret is not None:
+                returns_by_date.setdefault(day, []).append(float(ret))
+        median_by_date = {
+            day: _median(values)
+            for day, values in returns_by_date.items()
+            if len(values) >= 3
+        }
+
         samples: List[Dict[str, Any]] = []
         for row in ordered_rows:
-            label = self._derive_learning_label(row)
+            label = self._derive_learning_label(row, median_by_date=median_by_date)
             if label not in {"buy", "hold", "sell"}:
                 continue
             features = self._extract_model_features(
                 stock_code=str(row.get("code") or ""),
-                current_signal=str(row.get("signal") or "hold"),
+                # 训练特征必须用**校准前**的原始判断：推理时模型拿到的也是刚解析出的
+                # 原始信号。用校准后的信号训练会让训练/推理分布不一致。
+                current_signal=str(row.get("raw_signal") or row.get("signal") or "hold"),
                 model_used=row.get("model_used"),
-                score=int(row.get("sentiment_score") or 50),
-                trend_prediction=str(row.get("trend_prediction") or ""),
+                score=int(row.get("raw_score") if row.get("raw_score") is not None else row.get("sentiment_score") or 50),
+                trend_prediction=str(row.get("raw_trend") or row.get("trend_prediction") or ""),
                 context_snapshot=row.get("context_payload"),
             )
             samples.append(
@@ -696,17 +807,34 @@ class AnalysisCalibrationService:
                         or get_market_for_stock(str(row.get("code") or ""))
                         or "cn"
                     ).strip().lower(),
+                    "analysis_date": str(row.get("analysis_date") or ""),
+                    "window_days": int(row.get("window_days") or 0),
                 }
             )
         return samples
 
-    def _derive_learning_label(self, row: Dict[str, Any]) -> Optional[str]:
+    def _derive_learning_label(
+        self,
+        row: Dict[str, Any],
+        *,
+        median_by_date: Optional[Dict[str, float]] = None,
+    ) -> Optional[str]:
+        """标签用**超额收益**（个股收益 − 同日横截面中位数）。
+
+        直接用绝对收益会在趋势市里把绝大多数样本判成 buy，
+        基线准确率被抬高、模型学不到任何东西。
+        """
         stock_return_pct = row.get("stock_return_pct")
         if stock_return_pct is not None:
-            stock_return = float(stock_return_pct)
-            if stock_return >= self.learning_label_band_pct:
+            excess = float(stock_return_pct)
+            if median_by_date:
+                day = str(row.get("analysis_date") or "")
+                benchmark = median_by_date.get(day)
+                if benchmark is not None:
+                    excess -= float(benchmark)
+            if excess >= self.learning_label_band_pct:
                 return "buy"
-            if stock_return <= -self.learning_label_band_pct:
+            if excess <= -self.learning_label_band_pct:
                 return "sell"
             return "hold"
 
@@ -884,6 +1012,50 @@ class AnalysisCalibrationService:
         }
         return features
 
+    @staticmethod
+    def _skill_of(stats: SignalStats) -> float:
+        """信号的方向增量：准确率 − 该方向的自然发生率。
+
+        基准率退化（样本里几乎全是同一种结果）时退回 50% 中性先验：
+        此时没有横截面差异，扣基准只会把整段趋势当成信号能力。
+        """
+        if not 0.02 < stats.base_rate < 0.98:
+            return stats.accuracy - 0.5
+        return stats.skill
+
+    def _recent_slice_confirms(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        signal: str,
+        direction: str,
+    ) -> bool:
+        """最近一段样本是否仍支持同一结论（样本外检查）。
+
+        只看全量样本的校准器，会在风格/政策切换后继续用旧行情下的结论。
+        这里用最近约 40% 的样本复算一次：要求方向优势在近期同样成立。
+        日期不足 3 个不同交易日的场景无法切分，按旧行为放行。
+        """
+        dated = [row for row in rows if row.get("analysis_date")]
+        if len({str(row.get("analysis_date")) for row in dated}) < 3:
+            return True
+
+        dated.sort(key=lambda item: str(item.get("analysis_date")))
+        recent_size = max(3, int(len(dated) * 0.4))
+        recent = dated[-recent_size:]
+        stats = self._compute_signal_stats(
+            recent,
+            signal,
+            self._direction_base_rates(recent, self.learning_label_band_pct),
+        )
+        if stats.samples < 3:
+            return False
+
+        skill = self._skill_of(stats)
+        if direction == "positive":
+            return skill >= 0.10
+        return skill <= -0.05
+
     def _decide_adjustment(
         self,
         *,
@@ -895,18 +1067,29 @@ class AnalysisCalibrationService:
         if not rows:
             return None
 
-        current_stats = self._compute_signal_stats(rows, current_signal)
-        alt_candidates = [self._compute_signal_stats(rows, signal) for signal in ("buy", "hold", "sell") if signal != current_signal]
+        # 先算同一批样本里各方向的自然发生率，再比较"超出基准"的部分。
+        base_rates = self._direction_base_rates(rows, self.learning_label_band_pct)
+        current_stats = self._compute_signal_stats(rows, current_signal, base_rates)
+        alt_candidates = [
+            self._compute_signal_stats(rows, signal, base_rates)
+            for signal in ("buy", "hold", "sell")
+            if signal != current_signal
+        ]
         alt_candidates = [stats for stats in alt_candidates if stats.samples > 0]
-        best_alternative = max(alt_candidates, key=lambda item: (item.accuracy, item.samples), default=None)
+        best_alternative = max(
+            alt_candidates,
+            key=lambda item: (self._skill_of(item), item.samples),
+            default=None,
+        )
+        current_skill = self._skill_of(current_stats)
+        best_skill = self._skill_of(best_alternative) if best_alternative else 0.0
 
         if current_signal == "hold":
             promotion_threshold = max(threshold + 2, 14)
             if best_alternative is None or best_alternative.samples < promotion_threshold:
                 return None
-            if (
-                best_alternative.accuracy >= max(0.78, current_stats.accuracy + 0.12)
-                and 46 <= score <= 58
+            if best_skill >= 0.25 and 46 <= score <= 58 and self._recent_slice_confirms(
+                rows, signal=best_alternative.signal, direction="positive"
             ):
                 score_adjustment = 10 if best_alternative.signal == "buy" else -10
                 return {
@@ -916,7 +1099,10 @@ class AnalysisCalibrationService:
                     "suggested_signal": best_alternative.signal,
                     "score_adjustment": score_adjustment,
                     "applied": True,
-                    "reason": f"历史上同类场景更常演化为 {best_alternative.signal}。",
+                    "reason": (
+                        f"该场景历史上扣除市场基准后，{best_alternative.signal} "
+                        f"仍有 {best_skill * 100:.0f} 个百分点的方向优势。"
+                    ),
                 }
             return None
 
@@ -928,24 +1114,41 @@ class AnalysisCalibrationService:
         applied = False
         reason = ""
 
-        if current_stats.accuracy <= 0.30 and best_alternative and best_alternative.samples >= threshold and best_alternative.accuracy >= max(0.62, current_stats.accuracy + 0.20):
+        if (
+            current_skill <= -0.15
+            and best_alternative
+            and best_alternative.samples >= threshold
+            and best_skill >= 0.15
+            and self._recent_slice_confirms(rows, signal=current_signal, direction="negative")
+            and self._recent_slice_confirms(rows, signal=best_alternative.signal, direction="positive")
+        ):
             if 35 <= score <= 70:
-                suggested_signal = best_alternative.signal if best_alternative.accuracy >= 0.75 else "hold"
+                suggested_signal = best_alternative.signal if best_skill >= 0.25 else "hold"
                 applied = True
                 score_adjustment = -12 if current_signal == "buy" else 12
-                reason = f"{current_signal} 历史准确率偏低，而 {best_alternative.signal} 在相同范围内显著更优。"
-        elif current_stats.accuracy <= 0.45:
+                reason = (
+                    f"{current_signal} 在扣除市场基准后仍低于自然发生率，"
+                    f"而 {best_alternative.signal} 显著更优。"
+                )
+        elif current_skill <= -0.10 and self._recent_slice_confirms(
+            rows, signal=current_signal, direction="negative"
+        ):
             suggested_signal = "hold"
             applied = True
             score_adjustment = -8 if current_signal == "buy" else 8
-            reason = f"{current_signal} 历史准确率偏低，先降级为更保守的观望。"
-        elif current_stats.accuracy >= 0.65:
+            reason = f"{current_signal} 扣除市场基准后没有方向优势，先降级为更保守的观望。"
+        elif current_skill >= 0.20 and self._recent_slice_confirms(
+            rows, signal=current_signal, direction="positive"
+        ):
             applied = True
             if current_signal == "buy":
                 score_adjustment = 6
             elif current_signal == "sell":
                 score_adjustment = -6
-            reason = f"{current_signal} 历史准确率较高，适度强化当前结论。"
+            reason = (
+                f"{current_signal} 扣除市场基准后仍有 "
+                f"{current_skill * 100:.0f} 个百分点的方向优势，适度强化当前结论。"
+            )
 
         if not applied:
             return {
@@ -1061,7 +1264,47 @@ class AnalysisCalibrationService:
 
 
     @staticmethod
-    def _compute_signal_stats(rows: Iterable[Dict[str, Any]], signal: str) -> SignalStats:
+    def _direction_base_rates(rows: Iterable[Dict[str, Any]], band_pct: float) -> Dict[str, float]:
+        """同一批样本里各"方向口径"的自然发生率。
+
+        比较 buy / hold / sell 的 accuracy 时，分子分母根本不是同一件事：
+        buy 正确 = 上涨，观望正确 = 非上涨，持有正确 = 非下跌。牛市里 buy
+        天然接近 100%，熊市里观望天然接近 100%。不减去基准率，校准器只是在追涨杀跌。
+        """
+        returns = [
+            float(row.get("stock_return_pct"))
+            for row in rows
+            if row.get("stock_return_pct") is not None
+        ]
+        if not returns:
+            return {"up": 0.5, "down": 0.5, "not_up": 0.5, "not_down": 0.5}
+        band = abs(float(band_pct))
+        total = len(returns)
+        p_up = sum(1 for value in returns if value > band) / total
+        p_down = sum(1 for value in returns if value < -band) / total
+        return {
+            "up": p_up,
+            "down": p_down,
+            "not_up": 1.0 - p_up,
+            "not_down": 1.0 - p_down,
+        }
+
+    @staticmethod
+    def _base_rate_for_row(row: Dict[str, Any], base_rates: Dict[str, float]) -> float:
+        expected = str(row.get("direction_expected") or "").strip().lower()
+        if expected not in base_rates:
+            # 老数据 / 测试数据没有 direction_expected，按信号类型回退
+            expected = {"buy": "up", "sell": "down"}.get(
+                str(row.get("signal") or "").strip().lower(), "not_up"
+            )
+        return float(base_rates.get(expected, 0.5))
+
+    @staticmethod
+    def _compute_signal_stats(
+        rows: Iterable[Dict[str, Any]],
+        signal: str,
+        base_rates: Optional[Dict[str, float]] = None,
+    ) -> SignalStats:
         matched = [row for row in rows if row["signal"] == signal]
         if not matched:
             return SignalStats(signal=signal)
@@ -1069,11 +1312,19 @@ class AnalysisCalibrationService:
         accuracy = sum(1 for row in matched if row.get("direction_correct") is True) / len(matched)
         returns = [float(row.get("simulated_return_pct") or 0.0) for row in matched]
         avg_return = sum(returns) / len(returns) if returns else 0.0
+        if base_rates:
+            base_rate = sum(
+                AnalysisCalibrationService._base_rate_for_row(row, base_rates)
+                for row in matched
+            ) / len(matched)
+        else:
+            base_rate = 0.5
         return SignalStats(
             signal=signal,
             samples=len(matched),
             accuracy=accuracy,
             avg_return=avg_return,
+            base_rate=base_rate,
         )
 
     def _learning_engine_version(self) -> str:
@@ -1114,6 +1365,9 @@ class AnalysisCalibrationService:
 
         rows: List[Dict[str, Any]] = []
         skipped_placeholder = 0
+        skipped_degraded = 0
+        skipped_duplicate = 0
+        seen_signal_days: set = set()
         for backtest_row, history_row in pairs:
             payload = self._parse_payload(getattr(history_row, "raw_result", None))
             context_payload = self._parse_payload(getattr(history_row, "context_snapshot", None))
@@ -1129,6 +1383,28 @@ class AnalysisCalibrationService:
                 skipped_placeholder += 1
                 continue
 
+            # 纯文本降级 / 输出被截断的结果不是完整判断
+            if str(payload.get("parse_mode") or "structured").strip().lower() in {
+                "text_fallback",
+                "truncated",
+            }:
+                skipped_degraded += 1
+                continue
+
+            # 同一天同一只股票重复分析多次，收益完全相同，不是独立样本。
+            # pairs 按 evaluated_at 倒序，保留最新一条。
+            signal_day = (
+                backtest_row.analysis_date.isoformat()
+                if getattr(backtest_row, "analysis_date", None)
+                else ""
+            )
+            dedupe_key = (history_row.code, signal_day)
+            if signal_day and dedupe_key in seen_signal_days:
+                skipped_duplicate += 1
+                continue
+            if signal_day:
+                seen_signal_days.add(dedupe_key)
+
             rows.append(
                 {
                     "code": history_row.code,
@@ -1137,9 +1413,27 @@ class AnalysisCalibrationService:
                     "signal": signal,
                     "sentiment_score": payload.get("sentiment_score", getattr(history_row, "sentiment_score", 50)),
                     "trend_prediction": payload.get("trend_prediction", getattr(history_row, "trend_prediction", "")),
+                    # 校准前的原始判断：学习模型的特征必须和推理时（刚解析出的原始信号）
+                    # 保持同一分布，否则等于让模型学习"校准器校准过的输入"。
+                    "raw_signal": self._extract_raw_signal(payload, signal),
+                    "raw_score": self._extract_raw_score(
+                        payload, payload.get("sentiment_score", getattr(history_row, "sentiment_score", 50))
+                    ),
+                    "raw_trend": self._extract_raw_trend(
+                        payload, payload.get("trend_prediction", getattr(history_row, "trend_prediction", ""))
+                    ),
                     "direction_correct": backtest_row.direction_correct,
+                    "direction_expected": backtest_row.direction_expected,
                     "simulated_return_pct": backtest_row.simulated_return_pct,
                     "stock_return_pct": backtest_row.stock_return_pct,
+                    # 训练集必须按“信号日”排序：批量重跑回测后 evaluated_at
+                    # 全都是同一时刻，用它排序会把时间切分变成随机切分。
+                    "analysis_date": (
+                        backtest_row.analysis_date.isoformat()
+                        if getattr(backtest_row, "analysis_date", None)
+                        else None
+                    ),
+                    "window_days": int(backtest_row.eval_window_days or 0),
                     "evaluated_at_ts": backtest_row.evaluated_at.timestamp() if backtest_row.evaluated_at else 0.0,
                     "context_payload": context_payload,
                 }
@@ -1149,6 +1443,16 @@ class AnalysisCalibrationService:
             logger.info(
                 "[LearningLoop] 跳过 %s 条无 model_used 的占位样本（LLM 未参与的兜底结果）",
                 skipped_placeholder,
+            )
+        if skipped_degraded:
+            logger.info(
+                "[LearningLoop] 跳过 %s 条降级样本（纯文本解析或被 max_tokens 截断）",
+                skipped_degraded,
+            )
+        if skipped_duplicate:
+            logger.info(
+                "[LearningLoop] 跳过 %s 条同一信号日的重复分析样本",
+                skipped_duplicate,
             )
         return rows
 
@@ -1178,6 +1482,26 @@ class AnalysisCalibrationService:
     def _extract_model_used(payload: Dict[str, Any]) -> Optional[str]:
         model_used = str(payload.get("model_used", "") or "").strip()
         return model_used or None
+
+    @staticmethod
+    def _calibration_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        calibration = payload.get("calibration_info")
+        return calibration if isinstance(calibration, dict) else {}
+
+    def _extract_raw_signal(self, payload: Dict[str, Any], fallback: str) -> str:
+        calibration = self._calibration_payload(payload)
+        candidate = str(calibration.get("current_signal") or "").strip().lower()
+        return candidate if candidate in {"buy", "hold", "sell"} else fallback
+
+    def _extract_raw_score(self, payload: Dict[str, Any], fallback: Any) -> Any:
+        calibration = self._calibration_payload(payload)
+        value = calibration.get("original_score")
+        return fallback if value is None else value
+
+    def _extract_raw_trend(self, payload: Dict[str, Any], fallback: Any) -> Any:
+        calibration = self._calibration_payload(payload)
+        value = calibration.get("original_trend")
+        return fallback if not value else value
 
     @staticmethod
     def _extract_market(code: str, payload: Dict[str, Any], context_payload: Dict[str, Any]) -> str:

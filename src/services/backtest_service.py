@@ -151,6 +151,31 @@ class BacktestService:
                     config=eval_config,
                 )
 
+                # 双轨归因：同一条分析、同一段行情，再判一次"校准前"的原始建议，
+                # 才能回答"结论变准是 LLM 本来就对，还是校准救回来的"。
+                raw_advice = self._resolve_raw_advice(analysis, evaluation.get("operation_advice"))
+                raw_direction = BacktestEngine.infer_direction_expected(raw_advice)
+                raw_direction_correct: Optional[bool] = None
+                arm_advice = self._resolve_calibration_arm_advice(
+                    analysis, evaluation.get("operation_advice")
+                )
+                arm_direction = BacktestEngine.infer_direction_expected(arm_advice)
+                arm_direction_correct: Optional[bool] = None
+                if (
+                    evaluation.get("eval_status") == "completed"
+                    and evaluation.get("stock_return_pct") is not None
+                ):
+                    _, raw_direction_correct = BacktestEngine.classify_direction(
+                        stock_return_pct=float(evaluation["stock_return_pct"]),
+                        direction_expected=raw_direction,
+                        neutral_band_pct=neutral_band_pct,
+                    )
+                    _, arm_direction_correct = BacktestEngine.classify_direction(
+                        stock_return_pct=float(evaluation["stock_return_pct"]),
+                        direction_expected=arm_direction,
+                        neutral_band_pct=neutral_band_pct,
+                    )
+
                 status = evaluation.get("eval_status")
                 if status == "insufficient_data":
                     insufficient += 1
@@ -170,6 +195,12 @@ class BacktestService:
                         evaluated_at=datetime.now(),
                         operation_advice=evaluation.get("operation_advice"),
                         position_recommendation=evaluation.get("position_recommendation"),
+                        raw_operation_advice=raw_advice,
+                        raw_direction_expected=raw_direction,
+                        raw_direction_correct=raw_direction_correct,
+                        calibration_arm_operation_advice=arm_advice,
+                        calibration_arm_direction_expected=arm_direction,
+                        calibration_arm_direction_correct=arm_direction_correct,
                         start_price=evaluation.get("start_price"),
                         end_close=evaluation.get("end_close"),
                         max_high=evaluation.get("max_high"),
@@ -301,6 +332,79 @@ class BacktestService:
         return None
 
     @staticmethod
+    def _resolve_raw_advice(analysis, final_advice: Optional[str]) -> str:
+        """Return the pre-calibration advice for the same analysis record.
+
+        ``calibration_info.original_advice`` is written at analysis time; for
+        older rows fall back to the stored raw signal, then to the final advice
+        (no calibration applied means raw == final).
+        """
+        raw_payload = getattr(analysis, "raw_result", None)
+        payload: Dict[str, Any] = {}
+        if isinstance(raw_payload, dict):
+            payload = raw_payload
+        elif isinstance(raw_payload, str) and raw_payload.strip():
+            try:
+                parsed = json.loads(raw_payload)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError):
+                payload = {}
+
+        calibration = payload.get("calibration_info")
+        if not isinstance(calibration, dict) or not calibration.get("applied"):
+            return str(final_advice or "")
+
+        original_advice = str(calibration.get("original_advice") or "").strip()
+        if original_advice:
+            return original_advice
+
+        signal = str(calibration.get("current_signal") or "").strip().lower()
+        return {
+            "buy": "买入",
+            "sell": "减仓/卖出",
+            "hold": "持有",
+        }.get(signal, str(final_advice or ""))
+
+    @staticmethod
+    def _resolve_calibration_arm_advice(analysis, final_advice: Optional[str]) -> str:
+        """Return what the calibrator suggested, even when it was paused.
+
+        Applied rows already carry the calibrated advice as ``operation_advice``.
+        Paused rows keep the raw advice, so the shadow arm is reconstructed from
+        ``calibration_info.suggested_signal``; this keeps lift measurable while
+        calibration is disabled, allowing it to recover automatically.
+        """
+        raw_payload = getattr(analysis, "raw_result", None)
+        payload: Dict[str, Any] = {}
+        if isinstance(raw_payload, dict):
+            payload = raw_payload
+        elif isinstance(raw_payload, str) and raw_payload.strip():
+            try:
+                parsed = json.loads(raw_payload)
+                if isinstance(parsed, dict):
+                    payload = parsed
+            except (TypeError, ValueError):
+                payload = {}
+
+        calibration = payload.get("calibration_info")
+        if not isinstance(calibration, dict):
+            return str(final_advice or "")
+        if calibration.get("applied"):
+            # 已应用的校准，实际结论就是校准建议
+            return str(final_advice or "")
+
+        suggested = str(calibration.get("suggested_signal") or "").strip().lower()
+        current = str(calibration.get("current_signal") or "").strip().lower()
+        if suggested in {"buy", "hold", "sell"} and suggested != current:
+            return {
+                "buy": "买入",
+                "sell": "减仓/卖出",
+                "hold": "持有",
+            }.get(suggested, str(final_advice or ""))
+        return str(final_advice or "")
+
+    @staticmethod
     def _effective_engine_version(engine_version: str, entry_mode: str) -> str:
         suffix_map = {
             "analysis_close": "ac",
@@ -412,6 +516,9 @@ class BacktestService:
             loss_count=summary_data.get("loss_count") or 0,
             neutral_count=summary_data.get("neutral_count") or 0,
             direction_accuracy_pct=summary_data.get("direction_accuracy_pct"),
+            raw_direction_accuracy_pct=summary_data.get("raw_direction_accuracy_pct"),
+            calibration_lift_pct=summary_data.get("calibration_lift_pct"),
+            calibration_sample_count=summary_data.get("calibration_sample_count") or 0,
             win_rate_pct=summary_data.get("win_rate_pct"),
             neutral_rate_pct=summary_data.get("neutral_rate_pct"),
             avg_stock_return_pct=summary_data.get("avg_stock_return_pct"),
@@ -445,6 +552,9 @@ class BacktestService:
             "loss_count": row.loss_count,
             "neutral_count": row.neutral_count,
             "direction_accuracy_pct": row.direction_accuracy_pct,
+            "raw_direction_accuracy_pct": row.raw_direction_accuracy_pct,
+            "calibration_lift_pct": row.calibration_lift_pct,
+            "calibration_sample_count": int(row.calibration_sample_count or 0),
             "win_rate_pct": row.win_rate_pct,
             "neutral_rate_pct": row.neutral_rate_pct,
             "avg_stock_return_pct": row.avg_stock_return_pct,

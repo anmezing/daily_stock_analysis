@@ -231,6 +231,9 @@ class BacktestEngine:
                 take_profit=take_profit,
                 window_bars=window_bars,
                 end_close=end_close,
+                # next_close 模式在首根 K 线收盘价入场，该 K 线的
+                # 最高/最低发生在入场之前，不能用来判断止盈止损。
+                skip_first_bar=(entry_mode == "next_close"),
             )
         else:
             (
@@ -324,6 +327,35 @@ class BacktestEngine:
             round(direction_numerator / direction_denominator * 100, 2) if direction_denominator else None
         )
 
+        # 校准前的原始判断（用于归因：最终结论是不是校准救回来的）
+        raw_denominator = sum(
+            1 for r in completed if getattr(r, "raw_direction_correct", None) is not None
+        )
+        raw_numerator = sum(
+            1 for r in completed if getattr(r, "raw_direction_correct", None) is True
+        )
+        raw_direction_accuracy_pct = (
+            round(raw_numerator / raw_denominator * 100, 2) if raw_denominator else None
+        )
+
+        # 提升幅度只在"校准器会改变方向结论"的样本上比较（影子对照也算）：
+        # 未调整样本会把 lift 稀释到 0，闸门就会误判并永久停用校准。
+        changed_rows = [
+            r
+            for r in completed
+            if getattr(r, "raw_direction_correct", None) is not None
+            and getattr(r, "calibration_arm_direction_correct", None) is not None
+            and str(getattr(r, "calibration_arm_direction_expected", "") or "")
+            != str(getattr(r, "raw_direction_expected", "") or "")
+        ]
+        calibration_lift_pct = None
+        if changed_rows:
+            changed_arm = sum(
+                1 for r in changed_rows if r.calibration_arm_direction_correct is True
+            ) / len(changed_rows)
+            changed_raw = sum(1 for r in changed_rows if r.raw_direction_correct is True) / len(changed_rows)
+            calibration_lift_pct = round((changed_arm - changed_raw) * 100, 2)
+
         win_loss_denominator = win_count + loss_count
         win_rate_pct = round(win_count / win_loss_denominator * 100, 2) if win_loss_denominator else None
         neutral_rate_pct = round(neutral_count / len(execution_rows) * 100, 2) if execution_rows else None
@@ -397,6 +429,9 @@ class BacktestEngine:
             "loss_count": loss_count,
             "neutral_count": neutral_count,
             "direction_accuracy_pct": direction_accuracy_pct,
+            "raw_direction_accuracy_pct": raw_direction_accuracy_pct,
+            "calibration_lift_pct": calibration_lift_pct,
+            "calibration_sample_count": len(changed_rows),
             "win_rate_pct": win_rate_pct,
             "neutral_rate_pct": neutral_rate_pct,
             "avg_stock_return_pct": avg_stock_return_pct,
@@ -408,6 +443,25 @@ class BacktestEngine:
             "advice_breakdown": advice_breakdown,
             "diagnostics": diagnostics,
         }
+
+    @classmethod
+    def classify_direction(
+        cls,
+        *,
+        stock_return_pct: Optional[float],
+        direction_expected: str,
+        neutral_band_pct: float,
+    ) -> tuple[str, Optional[bool]]:
+        """Public wrapper around the direction classifier.
+
+        Used to score the pre-calibration signal against the same forward
+        window, so calibration lift can be measured instead of assumed.
+        """
+        return cls._classify_outcome(
+            stock_return_pct=stock_return_pct,
+            direction_expected=direction_expected,
+            neutral_band_pct=neutral_band_pct,
+        )
 
     @staticmethod
     def _normalize_text(value: Optional[str]) -> str:
@@ -620,6 +674,7 @@ class BacktestEngine:
         take_profit: Optional[float],
         window_bars: List[DailyBarLike],
         end_close: Optional[float],
+        skip_first_bar: bool = False,
     ) -> tuple[
         Optional[bool],
         Optional[bool],
@@ -661,6 +716,9 @@ class BacktestEngine:
         exit_reason = "window_end"
 
         for idx, bar in enumerate(window_bars, start=1):
+            if skip_first_bar and idx == 1:
+                # 入场发生在该 bar 收盘，盘中的高低点不可用
+                continue
             low = bar.low
             high = bar.high
             stop_hit = stop_loss is not None and low is not None and low <= stop_loss

@@ -6,6 +6,7 @@ and validate idempotency/force semantics, result field correctness,
 summary creation, and query methods.
 """
 
+import json
 import os
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from datetime import date, datetime
 from src.config import Config
 from src.core.backtest_engine import EXECUTION_LOGIC_REVISION, OVERALL_SENTINEL_CODE
 from src.services.backtest_service import BacktestService
+from src.repositories.backtest_repo import BacktestRepository
 from src.storage import AnalysisHistory, BacktestResult, BacktestSummary, DatabaseManager, StockDaily
 
 
@@ -49,6 +51,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                     operation_advice="买入",
                     trend_prediction="看多",
                     analysis_summary="test",
+                    raw_result='{"model_used": "gemini/gemini-2.5-flash", "success": true, "parse_mode": "structured", "decision_type": "buy"}',
                     stop_loss=95.0,
                     take_profit=110.0,
                     strategy_id="bull_trend",
@@ -286,6 +289,209 @@ class BacktestServiceTestCase(unittest.TestCase):
         self.assertEqual(item["direction_expected"], "up")
         self.assertTrue(item["direction_correct"])
 
+    def test_calibration_lift_is_measured_against_raw_advice(self) -> None:
+        """同一条分析同时评估校准前/后：结论变对是校准救回来的，还是本来就对。"""
+        with self.db.get_session() as session:
+            session.add(
+                AnalysisHistory(
+                    query_id="q-calibrated",
+                    code="000004",
+                    name="国华网安",
+                    report_type="simple",
+                    sentiment_score=50,
+                    # 校准后：卖出→持有；股票上涨后持有正确、原始卖出错误
+                    operation_advice="持有",
+                    trend_prediction="震荡",
+                    analysis_summary="calibrated",
+                    raw_result=json.dumps(
+                        {
+                            "model_used": "gemini/gemini-2.5-flash",
+                            "success": True,
+                            "decision_type": "hold",
+                            "operation_advice": "持有",
+                            "calibration_info": {
+                                "applied": True,
+                                "current_signal": "sell",
+                                "original_advice": "卖出",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at=datetime(2024, 1, 1, 0, 0, 0),
+                    context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                )
+            )
+            session.add(
+                StockDaily(code="000004", date=date(2024, 1, 1), open=10.0, high=10.2, low=9.8, close=10.0)
+            )
+            session.add_all([
+                StockDaily(code="000004", date=date(2024, 1, 2), open=10.2, high=10.5, low=10.1, close=10.4),
+                StockDaily(code="000004", date=date(2024, 1, 3), open=10.4, high=10.7, low=10.3, close=10.6),
+                StockDaily(code="000004", date=date(2024, 1, 4), open=10.6, high=10.9, low=10.5, close=10.7),
+            ])
+            session.commit()
+
+        service = BacktestService(db_manager=self.db)
+        service.run_backtest()
+
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "000004")
+                .one()
+            )
+            self.assertEqual(row.raw_operation_advice, "卖出")
+            self.assertEqual(row.raw_direction_expected, "down")
+            self.assertFalse(row.raw_direction_correct)
+            self.assertTrue(row.direction_correct)
+
+        summary = service.get_summary(scope="overall", code=None)
+        self.assertIsNotNone(summary)
+        # 600519（买入，上涨）原始与最终一致，不计入归因；
+        # 000004 校准把"卖出"改成"持有"，最终对、原始错 → lift +100
+        self.assertEqual(summary["raw_direction_accuracy_pct"], 50.0)
+        self.assertEqual(summary["direction_accuracy_pct"], 100.0)
+        self.assertEqual(summary["calibration_lift_pct"], 100.0)
+        self.assertEqual(summary["calibration_sample_count"], 1)
+
+    def test_paused_calibration_keeps_shadow_arm_for_recovery(self) -> None:
+        """暂停校准时仍记录影子建议，回测能继续判断它是否重新有效。"""
+        with self.db.get_session() as session:
+            session.add(
+                AnalysisHistory(
+                    query_id="q-shadow",
+                    code="000005",
+                    name="世纪星源",
+                    report_type="simple",
+                    sentiment_score=50,
+                    # 暂停：实际结论保持原始"观望"
+                    operation_advice="观望",
+                    trend_prediction="震荡",
+                    analysis_summary="paused",
+                    raw_result=json.dumps(
+                        {
+                            "model_used": "gemini/gemini-2.5-flash",
+                            "success": True,
+                            "decision_type": "hold",
+                            "operation_advice": "观望",
+                            "calibration_info": {
+                                "applied": False,
+                                "paused": True,
+                                "current_signal": "hold",
+                                "suggested_signal": "buy",
+                                "original_advice": "观望",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at=datetime(2024, 1, 1, 0, 0, 0),
+                    context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                )
+            )
+            session.add(
+                StockDaily(code="000005", date=date(2024, 1, 1), open=10.0, high=10.2, low=9.8, close=10.0)
+            )
+            session.add_all([
+                StockDaily(code="000005", date=date(2024, 1, 2), open=10.2, high=10.5, low=10.1, close=10.4),
+                StockDaily(code="000005", date=date(2024, 1, 3), open=10.4, high=10.7, low=10.3, close=10.6),
+                StockDaily(code="000005", date=date(2024, 1, 4), open=10.6, high=10.9, low=10.5, close=10.7),
+            ])
+            session.commit()
+
+        service = BacktestService(db_manager=self.db)
+        service.run_backtest()
+
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "000005")
+                .one()
+            )
+            self.assertEqual(row.calibration_arm_operation_advice, "买入")
+            self.assertTrue(row.calibration_arm_direction_correct)
+            self.assertFalse(row.raw_direction_correct)
+
+        summary = service.get_summary(scope="overall", code=None)
+        self.assertEqual(summary["calibration_lift_pct"], 100.0)
+        self.assertEqual(summary["calibration_sample_count"], 1)
+
+    def test_agent_snapshot_analysis_date_is_parsed(self) -> None:
+        """Agent 链路没有 enhanced_context，也要能从 analysis_date 定位信号日。"""
+        parsed = BacktestRepository.parse_analysis_date_from_snapshot(
+            '{"analysis_date": "2026-03-23", "stock_code": "AAPL"}'
+        )
+
+        self.assertEqual(parsed, date(2026, 3, 23))
+
+    def test_same_signal_day_is_evaluated_once(self) -> None:
+        """同一只股票同一天重复分析，不能按多条独立样本重复加权。"""
+        with self.db.get_session() as session:
+            session.add(
+                AnalysisHistory(
+                    query_id="q-dup",
+                    code="600519",
+                    name="贵州茅台",
+                    report_type="simple",
+                    sentiment_score=75,
+                    operation_advice="买入",
+                    trend_prediction="看多",
+                    analysis_summary="同一天第二次分析",
+                    raw_result='{"model_used": "gemini/gemini-2.5-flash", "success": true}',
+                    stop_loss=95.0,
+                    take_profit=110.0,
+                    created_at=datetime(2024, 1, 1, 12, 0, 0),
+                    context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                )
+            )
+            session.commit()
+
+        stats = BacktestService(db_manager=self.db).run_backtest()
+
+        self.assertEqual(stats["processed"], 1)
+
+    def test_placeholder_analyses_are_not_backtested(self) -> None:
+        """LLM 未参与 / 文本降级的记录不参与回测，否则准确率被占位结论稀释。"""
+        with self.db.get_session() as session:
+            session.add_all(
+                [
+                    AnalysisHistory(
+                        query_id="q-stub",
+                        code="000002",
+                        name="万科A",
+                        report_type="simple",
+                        sentiment_score=50,
+                        operation_advice="持有",
+                        trend_prediction="震荡",
+                        analysis_summary="LLM 未配置",
+                        raw_result='{"success": false, "operation_advice": "持有"}',
+                        created_at=datetime(2024, 1, 1, 0, 0, 0),
+                        context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                    ),
+                    AnalysisHistory(
+                        query_id="q-degraded",
+                        code="000003",
+                        name="国农科技",
+                        report_type="simple",
+                        sentiment_score=50,
+                        operation_advice="持有",
+                        trend_prediction="震荡",
+                        analysis_summary="JSON 解析失败",
+                        raw_result=(
+                            '{"model_used": "gemini/gemini-2.5-flash",'
+                            ' "success": true, "parse_mode": "text_fallback"}'
+                        ),
+                        created_at=datetime(2024, 1, 1, 0, 0, 0),
+                        context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                    ),
+                ]
+            )
+            session.commit()
+
+        stats = BacktestService(db_manager=self.db).run_backtest()
+
+        self.assertEqual(stats["processed"], 1)
+        self.assertEqual(stats["saved"], 1)
+
     def test_multi_stock_summaries(self) -> None:
         """Verify separate summaries for multiple stocks + correct overall aggregate."""
         old_created_at = datetime(2024, 1, 1, 0, 0, 0)
@@ -302,6 +508,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                     operation_advice="卖出",
                     trend_prediction="看空",
                     analysis_summary="test2",
+                    raw_result='{"model_used": "gemini/gemini-2.5-flash", "success": true, "parse_mode": "structured", "decision_type": "sell"}',
                     stop_loss=None,
                     take_profit=None,
                     created_at=old_created_at,

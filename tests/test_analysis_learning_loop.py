@@ -6,7 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -98,6 +98,8 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
         signal_score: int | None = None,
         bias_ma5: float | None = None,
         china_exposure_level: str = "",
+        analysis_day: date | None = None,
+        parse_mode: str = "structured",
     ) -> None:
         advice_map = {
             "buy": "买入",
@@ -139,6 +141,7 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
                     "trend_prediction": trend_map[signal],
                     "model_used": model_used,
                     "sentiment_score": score_value,
+                    "parse_mode": parse_mode,
                 }, ensure_ascii=False),
                 context_snapshot=json.dumps(context_snapshot, ensure_ascii=False),
                 created_at=created_at,
@@ -149,6 +152,7 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
                 BacktestResult(
                     analysis_history_id=history.id,
                     code=code,
+                    analysis_date=analysis_day or date(2024, 1, 1),
                     eval_window_days=10,
                     engine_version=_learning_engine_version(),
                     eval_status="completed",
@@ -309,6 +313,321 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
 
         self.assertEqual([row["code"] for row in rows], ["AAPL"])
 
+    def _seed_training_timeline(self, *, days: int = 60, start: date | None = None) -> None:
+        """按日铺一条可训练时间线：特征与标签强相关，且日期跨度足够留出隔离期。"""
+        base = start or date(2024, 1, 1)
+        for index in range(days):
+            bullish = index % 2 == 0
+            self._insert_learning_record(
+                query_id=f"seed-{index}",
+                code=f"SYM{index:02d}",
+                signal="buy" if bullish else "sell",
+                direction_correct=True,
+                simulated_return_pct=6.0 if bullish else 0.0,
+                stock_return_pct=6.0 if bullish else -6.0,
+                change_pct=4.0 if bullish else -4.0,
+                trend_strength=90 if bullish else 20,
+                signal_score=92 if bullish else 18,
+                bias_ma5=1.1 if bullish else -1.2,
+                china_exposure_level="high" if bullish else "low",
+                analysis_day=base + timedelta(days=index),
+            )
+
+    def test_learning_labels_use_excess_return(self) -> None:
+        """同一天所有标的都涨 5% 时，不能把全部样本标成 buy。"""
+        day = date(2024, 1, 15)
+        for idx, code in enumerate(("AAPL", "MSFT", "NVDA")):
+            self._insert_learning_record(
+                query_id=f"mkt-{idx}",
+                code=code,
+                signal="hold",
+                direction_correct=True,
+                simulated_return_pct=0.0,
+                stock_return_pct=5.0,
+                analysis_day=day,
+            )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        samples = service._build_training_samples(service._load_learning_rows())
+
+        self.assertTrue(samples)
+        # 超额收益 = 5% - 同日中位数 5% = 0 → 全部中性
+        self.assertEqual({sample["label"] for sample in samples}, {"hold"})
+
+    def test_learning_rows_dedupe_same_signal_day(self) -> None:
+        """同一股票同一天分析两次，收益相同，只能算一条样本。"""
+        for index in range(2):
+            self._insert_learning_record(
+                query_id=f"q-dup-{index}",
+                code="AAPL",
+                signal="buy",
+                direction_correct=True,
+                simulated_return_pct=3.0,
+                stock_return_pct=3.0,
+            )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = service._load_learning_rows()
+
+        self.assertEqual(len(rows), 1)
+
+    def test_learning_rows_exclude_degraded_text_parses(self) -> None:
+        """JSON 解析失败时按关键词猜的方向，不能当成模型判断去训练。"""
+        self._insert_learning_record(
+            query_id="q-structured",
+            code="AAPL",
+            signal="buy",
+            direction_correct=True,
+            simulated_return_pct=3.0,
+            stock_return_pct=3.0,
+        )
+        self._insert_learning_record(
+            query_id="q-degraded",
+            code="TSLA",
+            signal="sell",
+            direction_correct=False,
+            simulated_return_pct=-3.0,
+            stock_return_pct=-3.0,
+            parse_mode="text_fallback",
+        )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = service._load_learning_rows()
+
+        self.assertEqual([row["code"] for row in rows], ["AAPL"])
+
+    def test_calibration_does_not_promote_hold_from_market_drift(self) -> None:
+        """牛市里 buy 的高准确率只是市场漂移，不能据此把观望改成买入。"""
+        self.config.analysis_learning_model_enabled = False
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+
+        rows = []
+        # 20 个样本里 18 个上涨：buy 全对，但基准率也是 90%
+        for index in range(14):
+            rows.append(
+                {
+                    "signal": "buy",
+                    "direction_correct": True,
+                    "simulated_return_pct": 5.0,
+                    "stock_return_pct": 5.0,
+                }
+            )
+        for index in range(4):
+            rows.append(
+                {
+                    "signal": "hold",
+                    "direction_correct": False,
+                    "simulated_return_pct": 0.0,
+                    "stock_return_pct": 5.0,
+                }
+            )
+        for index in range(2):
+            rows.append(
+                {
+                    "signal": "hold",
+                    "direction_correct": True,
+                    "simulated_return_pct": 0.0,
+                    "stock_return_pct": -5.0,
+                }
+            )
+
+        decision = service._decide_adjustment(
+            rows=rows,
+            current_signal="hold",
+            threshold=14,
+            score=50,
+        )
+
+        self.assertIsNone(decision)
+
+    def test_calibration_promotes_hold_when_edge_beats_base_rate(self) -> None:
+        self.config.analysis_learning_model_enabled = False
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+
+        rows = []
+        for index in range(16):
+            rows.append(
+                {
+                    "signal": "buy",
+                    "direction_correct": True,
+                    "simulated_return_pct": 5.0,
+                    "stock_return_pct": 5.0,
+                }
+            )
+        for index in range(14):
+            rows.append(
+                {
+                    "signal": "hold",
+                    "direction_correct": True,
+                    "simulated_return_pct": 0.0,
+                    "stock_return_pct": -3.0,
+                }
+            )
+
+        decision = service._decide_adjustment(
+            rows=rows,
+            current_signal="hold",
+            threshold=14,
+            score=50,
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision["suggested_signal"], "buy")
+
+    def test_calibration_ignores_edge_that_only_exists_in_old_samples(self) -> None:
+        """近期已经不再成立的历史优势，不能拿来强化当前信号。"""
+        self.config.analysis_learning_model_enabled = False
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+
+        rows = []
+        day = date(2024, 1, 1)
+        # 旧样本：buy 全部正确，强势优势明显
+        for index in range(14):
+            rows.append(
+                {
+                    "signal": "buy",
+                    "direction_correct": True,
+                    "simulated_return_pct": 5.0,
+                    "stock_return_pct": 5.0,
+                    "analysis_date": (day + timedelta(days=index)).isoformat(),
+                }
+            )
+        # 基准样本：下跌
+        for index in range(14):
+            rows.append(
+                {
+                    "signal": "hold",
+                    "direction_correct": True,
+                    "simulated_return_pct": 0.0,
+                    "stock_return_pct": -5.0,
+                    "analysis_date": (day + timedelta(days=index)).isoformat(),
+                }
+            )
+        # 近期样本：buy 一半对一半错，优势消失
+        for index in range(12):
+            won = index % 2 == 0
+            rows.append(
+                {
+                    "signal": "buy",
+                    "direction_correct": won,
+                    "simulated_return_pct": 5.0 if won else -5.0,
+                    "stock_return_pct": 5.0 if won else -5.0,
+                    "analysis_date": (day + timedelta(days=30 + index)).isoformat(),
+                }
+            )
+
+        decision = service._decide_adjustment(
+            rows=rows,
+            current_signal="buy",
+            threshold=20,
+            score=65,
+        )
+
+        self.assertFalse(decision["applied"])
+
+    def test_calibration_stores_pre_calibration_signal_for_training(self) -> None:
+        """校准信息要保留校准前的分数/趋势，学习环节才能用原始判断训练。"""
+        for idx, code in enumerate(("AAPL", "MSFT", "NVDA"), start=1):
+            self._insert_learning_record(
+                query_id=f"bad-sell-{idx}",
+                code=code,
+                signal="sell",
+                direction_correct=False,
+                simulated_return_pct=-6.0,
+                stock_return_pct=6.0,
+            )
+        for idx, code in enumerate(("META", "GOOGL", "AMZN", "TSLA"), start=1):
+            self._insert_learning_record(
+                query_id=f"good-buy-{idx}",
+                code=code,
+                signal="buy",
+                direction_correct=True,
+                simulated_return_pct=8.0,
+                stock_return_pct=8.0,
+            )
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        result = AnalysisResult(
+            code="AAPL",
+            name="Apple Inc.",
+            sentiment_score=38,
+            trend_prediction="看空",
+            operation_advice="减仓/卖出",
+            decision_type="sell",
+            analysis_summary="原始判断偏空。",
+            success=True,
+            model_used="gemini/gemini-2.5-flash",
+        )
+
+        calibrated = service.calibrate_result(result)
+        info = calibrated.calibration_info or {}
+
+        self.assertEqual(info.get("current_signal"), "sell")
+        self.assertEqual(info.get("original_score"), 38)
+        self.assertEqual(info.get("original_trend"), "看空")
+        # 结论可以被校准，但原始判断必须保留
+        self.assertEqual(calibrated.decision_type, "buy")
+
+    def test_training_features_use_raw_signal_not_calibrated_signal(self) -> None:
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = [
+            {
+                "code": "AAPL",
+                "market": "us",
+                "model_used": "gemini/gemini-2.5-flash",
+                "signal": "buy",
+                "raw_signal": "sell",
+                "sentiment_score": 75,
+                "raw_score": 30,
+                "trend_prediction": "看多",
+                "raw_trend": "看空",
+                "direction_correct": True,
+                "simulated_return_pct": 5.0,
+                "stock_return_pct": 5.0,
+                "analysis_date": "2024-01-02",
+                "window_days": 10,
+                "context_payload": {},
+            }
+        ]
+
+        samples = service._build_training_samples(rows)
+
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["features"]["current_signal_bias"], -1.0)
+        self.assertAlmostEqual(samples[0]["features"]["score_norm"], 0.30, places=2)
+
+    def test_calibration_pauses_itself_when_lift_is_negative(self) -> None:
+        """历史回测显示校准不如原始判断时，自动停止纠偏。"""
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        result = AnalysisResult(
+            code="AAPL",
+            name="Apple Inc.",
+            sentiment_score=62,
+            trend_prediction="看多",
+            operation_advice="买入",
+            decision_type="buy",
+            analysis_summary="原始分析偏多。",
+            success=True,
+            model_used="gemini/gemini-2.5-flash",
+        )
+
+        with patch(
+            "src.services.analysis_calibration_service.BacktestService.get_summary",
+            return_value={
+                "direction_accuracy_pct": 48.0,
+                "raw_direction_accuracy_pct": 55.0,
+                "calibration_lift_pct": -7.0,
+                "calibration_sample_count": 40,
+                "completed_count": 40,
+            },
+        ):
+            calibrated = service.calibrate_result(result)
+
+        self.assertFalse(calibrated.calibration_info.get("applied"))
+        self.assertIn("暂停", calibrated.calibration_info.get("reason", ""))
+        self.assertEqual(calibrated.decision_type, "buy")
+        self.assertEqual(calibrated.sentiment_score, 62)
+
     def test_maybe_refresh_backtests_respects_cooldown(self) -> None:
         service = AnalysisCalibrationService(db_manager=self.db, config=self.config, time_fn=lambda: 1000.0)
         with patch("src.services.analysis_calibration_service.BacktestService.run_backtest", return_value={"processed": 0, "saved": 0, "completed": 0, "insufficient": 0, "errors": 0}) as mock_run:
@@ -321,34 +640,8 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
         self.config.analysis_learning_model_train_min_samples = 6
         self.config.analysis_learning_model_scope_min_samples = 6
 
-        for idx, code in enumerate(("AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOGL"), start=1):
-            self._insert_learning_record(
-                query_id=f"bull-{idx}",
-                code=code,
-                signal="buy",
-                direction_correct=True,
-                simulated_return_pct=7.0,
-                stock_return_pct=7.0,
-                change_pct=4.2,
-                trend_strength=90,
-                signal_score=92,
-                bias_ma5=1.1,
-                china_exposure_level="high",
-            )
-        for idx, code in enumerate(("BABA", "NIO", "PDD", "JD", "BIDU", "LI"), start=1):
-            self._insert_learning_record(
-                query_id=f"bear-{idx}",
-                code=code,
-                signal="sell",
-                direction_correct=True,
-                simulated_return_pct=0.0,
-                stock_return_pct=-7.0,
-                change_pct=-4.1,
-                trend_strength=20,
-                signal_score=18,
-                bias_ma5=-1.2,
-                china_exposure_level="low",
-            )
+        # 按日铺 60 天：70% 训练、隔离 10 天、其余做验证集
+        self._seed_training_timeline(days=60)
 
         service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
         train_stats = service.maybe_refresh_model()
@@ -385,11 +678,12 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
         self.assertEqual(calibrated.operation_advice, "买入")
         self.assertIsInstance(calibrated.calibration_info, dict)
         self.assertIn("model_prediction", calibrated.calibration_info)
-        self.assertEqual(calibrated.calibration_info.get("source_scope"), "学习校准模型")
+        self.assertIn("学习模型", calibrated.calibration_info.get("source_scope"))
         self.assertEqual(calibrated.calibration_info["model_prediction"].get("engine"), "hist_gradient_boosting")
         self.assertEqual(calibrated.calibration_info["model_prediction"].get("scope"), "us")
 
-    def test_learning_model_does_not_fail_when_time_split_train_side_is_single_class(self) -> None:
+    def test_no_model_without_a_clean_validation_set(self) -> None:
+        """没有日期信息 / 无法切出隔离验证集时不出模型，而不是硬训练。"""
         samples = []
         for idx in range(18):
             samples.append(
@@ -415,9 +709,32 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
             min_scope_samples=12,
         )
 
-        self.assertIsNotNone(model)
-        self.assertIn("global", model.submodels)
-        self.assertIn("us", model.submodels)
+        # 样本没有 analysis_date，无法按日期切分并留出隔离期 → 不出模型
+        self.assertIsNone(model)
+
+    def test_single_class_training_side_yields_no_model(self) -> None:
+        samples = []
+        for idx, day in enumerate(
+            (date(2024, 1, 1) + timedelta(days=i)).isoformat() for i in range(40)
+        ):
+            samples.append(
+                {
+                    "features": {"score_norm": 0.85, "current_signal_bias": 1.0},
+                    "label": "buy",
+                    "market": "us",
+                    "analysis_date": day,
+                    "window_days": 10,
+                }
+            )
+
+        model = SmallCalibrationModel.fit(
+            samples,
+            preferred_backend="tree",
+            market_split=True,
+            min_scope_samples=12,
+        )
+
+        self.assertIsNone(model)
 
     def test_calibration_hold_downgrade_keeps_bullish_hold_bias(self) -> None:
         self.config.analysis_learning_model_enabled = False
@@ -478,9 +795,9 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
                 }
 
         class FakeModel:
-            validation_accuracy = None
-            validation_count = 0
-            baseline_accuracy = None
+            validation_accuracy = 0.70
+            validation_count = 20
+            baseline_accuracy = 0.50
 
             def predict(self, features, *, scope_hint=None):
                 return FakePrediction()
@@ -567,7 +884,7 @@ class PipelineLearningLoopTestCase(unittest.TestCase):
         self, _mock_market, _mock_market_today
     ) -> None:
         with patch("src.core.pipeline.get_config") as mock_config, \
-             patch("src.core.pipeline.get_db") as mock_db, \
+             patch("src.core.pipeline.get_db"), \
              patch("src.core.pipeline.DataFetcherManager"), \
              patch("src.core.pipeline.GeminiAnalyzer"), \
              patch("src.core.pipeline.NotificationService"), \

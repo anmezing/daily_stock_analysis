@@ -346,7 +346,18 @@ class BacktestResult(Base):
     simulated_entry_price = Column(Float)
     simulated_exit_price = Column(Float)
     simulated_exit_reason = Column(String(24))  # stop_loss/take_profit/window_end/cash/ambiguous_stop_loss
-    simulated_return_pct = Column(Float)
+    simulated_return_pct = Column(Float)  # 扣成本后的净收益
+    simulated_return_pct_gross = Column(Float)
+
+    # 路径指标：窗口内最大浮盈/浮亏（long）
+    mfe_pct = Column(Float)
+    mae_pct = Column(Float)
+    days_to_mfe = Column(Integer)
+    days_to_mae = Column(Integer)
+
+    # 基准对比（同窗口、收盘到收盘）
+    benchmark_return_pct = Column(Float)
+    excess_return_pct = Column(Float)
 
     __table_args__ = (
         UniqueConstraint(
@@ -397,6 +408,13 @@ class BacktestResult(Base):
             "simulated_exit_price": self.simulated_exit_price,
             "simulated_exit_reason": self.simulated_exit_reason,
             "simulated_return_pct": self.simulated_return_pct,
+            "simulated_return_pct_gross": self.simulated_return_pct_gross,
+            "mfe_pct": self.mfe_pct,
+            "mae_pct": self.mae_pct,
+            "days_to_mfe": self.days_to_mfe,
+            "days_to_mae": self.days_to_mae,
+            "benchmark_return_pct": self.benchmark_return_pct,
+            "excess_return_pct": self.excess_return_pct,
         }
 
 
@@ -437,6 +455,12 @@ class BacktestSummary(Base):
     # 收益
     avg_stock_return_pct = Column(Float)
     avg_simulated_return_pct = Column(Float)
+    avg_simulated_return_pct_gross = Column(Float)
+    avg_mfe_pct = Column(Float)
+    avg_mae_pct = Column(Float)
+    avg_benchmark_return_pct = Column(Float)
+    avg_excess_return_pct = Column(Float)
+    excess_win_rate_pct = Column(Float)
 
     # 目标价触发统计（仅 long 且配置止盈/止损时统计）
     stop_loss_trigger_rate = Column(Float)
@@ -872,11 +896,24 @@ class DatabaseManager:
                 ("calibration_arm_operation_advice", "VARCHAR(20)"),
                 ("calibration_arm_direction_expected", "VARCHAR(16)"),
                 ("calibration_arm_direction_correct", "BOOLEAN"),
+                ("simulated_return_pct_gross", "FLOAT"),
+                ("mfe_pct", "FLOAT"),
+                ("mae_pct", "FLOAT"),
+                ("days_to_mfe", "INTEGER"),
+                ("days_to_mae", "INTEGER"),
+                ("benchmark_return_pct", "FLOAT"),
+                ("excess_return_pct", "FLOAT"),
             ],
             "backtest_summaries": [
                 ("raw_direction_accuracy_pct", "FLOAT"),
                 ("calibration_lift_pct", "FLOAT"),
                 ("calibration_sample_count", "INTEGER"),
+                ("avg_simulated_return_pct_gross", "FLOAT"),
+                ("avg_mfe_pct", "FLOAT"),
+                ("avg_mae_pct", "FLOAT"),
+                ("avg_benchmark_return_pct", "FLOAT"),
+                ("avg_excess_return_pct", "FLOAT"),
+                ("excess_win_rate_pct", "FLOAT"),
             ],
         }
         indexes = {

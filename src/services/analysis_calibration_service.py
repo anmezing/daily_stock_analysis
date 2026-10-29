@@ -1009,6 +1009,12 @@ class AnalysisCalibrationService:
             "news_window_norm": self._clip(self._to_float(enhanced.get("news_window_days"), 3.0) / 7.0, 0.0, 2.0),
             "is_index_etf": 1.0 if enhanced.get("is_index_etf") else 0.0,
             "data_missing": 1.0 if enhanced.get("data_missing") else 0.0,
+            "regime_above_ma200": 1.0 if (enhanced.get("market_regime") or {}).get("above_ma200") else 0.0,
+            "regime_volatility_norm": self._clip(
+                self._to_float((enhanced.get("market_regime") or {}).get("volatility_20d_pct")) / 5.0,
+                0.0,
+                3.0,
+            ),
         }
         return features
 
@@ -1381,6 +1387,10 @@ class AnalysisCalibrationService:
             model_used = self._extract_model_used(payload)
             if not model_used:
                 skipped_placeholder += 1
+                continue
+
+            if payload.get("numeric_consistency") is False:
+                skipped_degraded += 1
                 continue
 
             # 纯文本降级 / 输出被截断的结果不是完整判断

@@ -50,6 +50,13 @@ class EvaluationConfig:
     neutral_band_pct: float = 2.0
     engine_version: str = "v1"
     entry_mode: str = "next_open"
+    commission_bps: float = 0.0
+    slippage_bps: float = 0.0
+
+    @property
+    def round_trip_cost_pct(self) -> float:
+        """Commission + slippage applied on both entry and exit, in percent."""
+        return 2.0 * (float(self.commission_bps) + float(self.slippage_bps)) / 100.0
 
 
 class BacktestEngine:
@@ -247,13 +254,38 @@ class BacktestEngine:
             ) = gap_exit
 
         simulated_entry_price = entry_price if position == "long" else None
-        simulated_return_pct: Optional[float]
+        simulated_return_pct_gross: Optional[float]
         if position != "long":
-            simulated_return_pct = 0.0
+            simulated_return_pct_gross = 0.0
         elif simulated_exit_price is None:
+            simulated_return_pct_gross = None
+        else:
+            simulated_return_pct_gross = (simulated_exit_price - entry_price) / entry_price * 100
+
+        round_trip_cost_pct = config.round_trip_cost_pct if position == "long" else 0.0
+        simulated_return_pct: Optional[float]
+        if simulated_return_pct_gross is None:
             simulated_return_pct = None
         else:
-            simulated_return_pct = (simulated_exit_price - entry_price) / entry_price * 100
+            simulated_return_pct = simulated_return_pct_gross - round_trip_cost_pct
+
+        # 路径指标：窗口内最大浮盈/浮亏，用来看"方向对但中途回撤多深"
+        mfe_pct: Optional[float] = None
+        mae_pct: Optional[float] = None
+        days_to_mfe: Optional[int] = None
+        days_to_mae: Optional[int] = None
+        if position == "long":
+            path_bars = window_bars[1:] if entry_mode == "next_close" else window_bars
+            highs = [(idx, b.high) for idx, b in enumerate(path_bars, start=1) if b.high is not None]
+            lows = [(idx, b.low) for idx, b in enumerate(path_bars, start=1) if b.low is not None]
+            if highs:
+                mfe_idx, mfe_value = max(highs, key=lambda item: item[1])
+                mfe_pct = (mfe_value - entry_price) / entry_price * 100
+                days_to_mfe = mfe_idx
+            if lows:
+                mae_idx, mae_value = min(lows, key=lambda item: item[1])
+                mae_pct = (mae_value - entry_price) / entry_price * 100
+                days_to_mae = mae_idx
 
         if position == "long" and simulated_return_pct is not None:
             outcome, _ = cls._classify_outcome(
@@ -294,6 +326,12 @@ class BacktestEngine:
             "simulated_exit_price": simulated_exit_price,
             "simulated_exit_reason": simulated_exit_reason,
             "simulated_return_pct": simulated_return_pct,
+            "simulated_return_pct_gross": simulated_return_pct_gross,
+            "round_trip_cost_pct": round_trip_cost_pct,
+            "mfe_pct": mfe_pct,
+            "mae_pct": mae_pct,
+            "days_to_mfe": days_to_mfe,
+            "days_to_mae": days_to_mae,
         }
 
     @classmethod
@@ -362,6 +400,25 @@ class BacktestEngine:
 
         avg_stock_return_pct = cls._average([r.stock_return_pct for r in completed])
         avg_simulated_return_pct = cls._average([r.simulated_return_pct for r in execution_rows])
+        avg_simulated_return_pct_gross = cls._average(
+            [getattr(r, "simulated_return_pct_gross", None) for r in execution_rows]
+        )
+        avg_mfe_pct = cls._average([getattr(r, "mfe_pct", None) for r in execution_rows])
+        avg_mae_pct = cls._average([getattr(r, "mae_pct", None) for r in execution_rows])
+        avg_benchmark_return_pct = cls._average(
+            [getattr(r, "benchmark_return_pct", None) for r in completed]
+        )
+        excess_rows = [
+            r for r in execution_rows if getattr(r, "excess_return_pct", None) is not None
+        ]
+        avg_excess_return_pct = cls._average(
+            [r.excess_return_pct for r in excess_rows]
+        )
+        excess_win_rate_pct = (
+            round(sum(1 for r in excess_rows if r.excess_return_pct > 0) / len(excess_rows) * 100, 2)
+            if excess_rows
+            else None
+        )
 
         stop_applicable = [
             r
@@ -436,6 +493,12 @@ class BacktestEngine:
             "neutral_rate_pct": neutral_rate_pct,
             "avg_stock_return_pct": avg_stock_return_pct,
             "avg_simulated_return_pct": avg_simulated_return_pct,
+            "avg_simulated_return_pct_gross": avg_simulated_return_pct_gross,
+            "avg_mfe_pct": avg_mfe_pct,
+            "avg_mae_pct": avg_mae_pct,
+            "avg_benchmark_return_pct": avg_benchmark_return_pct,
+            "avg_excess_return_pct": avg_excess_return_pct,
+            "excess_win_rate_pct": excess_win_rate_pct,
             "stop_loss_trigger_rate": stop_loss_trigger_rate,
             "take_profit_trigger_rate": take_profit_trigger_rate,
             "ambiguous_rate": ambiguous_rate,

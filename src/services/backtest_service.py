@@ -20,6 +20,8 @@ from src.core.backtest_engine import (
 from src.repositories.backtest_repo import BacktestRepository
 from src.repositories.stock_repo import StockRepository
 from src.services.analysis_calibration_model import SmallCalibrationModel
+from src.services.benchmark_service import BenchmarkService
+from src.core.trading_calendar import get_market_for_stock
 from src.storage import BacktestResult, BacktestSummary, DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class BacktestService:
         self.db = db_manager or DatabaseManager.get_instance()
         self.repo = BacktestRepository(self.db)
         self.stock_repo = StockRepository(self.db)
+        self.benchmark = BenchmarkService(self.db)
 
     def run_backtest(
         self,
@@ -42,13 +45,16 @@ class BacktestService:
         min_age_days: Optional[int] = None,
         limit: int = 200,
     ) -> Dict[str, Any]:
+        """Evaluate every configured horizon and aggregate the run stats."""
         config = get_config()
 
-        if eval_window_days is None:
-            eval_window_days = getattr(config, "backtest_eval_window_days", 10)
+        primary_window = int(
+            eval_window_days
+            if eval_window_days is not None
+            else getattr(config, "backtest_eval_window_days", 10)
+        )
         if min_age_days is None:
             min_age_days = getattr(config, "backtest_min_age_days", 14)
-
         engine_version = getattr(config, "backtest_engine_version", "v1")
         neutral_band_pct = float(getattr(config, "backtest_neutral_band_pct", 2.0))
         entry_mode = BacktestEngine._normalize_entry_mode(
@@ -59,13 +65,78 @@ class BacktestService:
             entry_mode,
         )
 
-        eval_config = EvaluationConfig(
-            eval_window_days=int(eval_window_days),
-            neutral_band_pct=neutral_band_pct,
-            engine_version=effective_engine_version,
-            entry_mode=entry_mode,
-        )
+        windows = self._resolve_windows(primary_window)
+        totals = {
+            "processed": 0,
+            "saved": 0,
+            "completed": 0,
+            "insufficient": 0,
+            "errors": 0,
+            "data_quality": 0,
+        }
+        per_window: Dict[str, Dict[str, Any]] = {}
+        for window in windows:
+            eval_config = EvaluationConfig(
+                eval_window_days=int(window),
+                neutral_band_pct=neutral_band_pct,
+                engine_version=effective_engine_version,
+                entry_mode=entry_mode,
+                commission_bps=float(getattr(config, "backtest_commission_bps", 0.0) or 0.0),
+                slippage_bps=float(getattr(config, "backtest_slippage_bps", 0.0) or 0.0),
+            )
+            stats = self._run_window(
+                code=code,
+                force=force,
+                eval_window_days=int(window),
+                min_age_days=int(min_age_days),
+                limit=int(limit),
+                effective_engine_version=effective_engine_version,
+                eval_config=eval_config,
+                neutral_band_pct=neutral_band_pct,
+            )
+            per_window[str(window)] = stats
+            for key in totals:
+                totals[key] += int(stats.get(key, 0) or 0)
 
+        return {
+            **totals,
+            "windows": windows,
+            "per_window": per_window,
+        }
+
+    def _resolve_windows(self, primary_window: int) -> List[int]:
+        """Return the primary window plus configured extra horizons."""
+        primary = max(1, int(primary_window))
+        raw = getattr(get_config(), "backtest_extra_windows", "")
+        extras: List[int] = []
+        if isinstance(raw, str):
+            for token in raw.replace("，", ",").split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    value = int(token)
+                except ValueError:
+                    continue
+                if 1 <= value <= 120:
+                    extras.append(value)
+        elif isinstance(raw, (list, tuple)):
+            extras = [int(value) for value in raw if str(value).strip().isdigit()]
+        windows = sorted({primary, *extras})
+        return windows or [primary]
+
+    def _run_window(
+        self,
+        *,
+        code: Optional[str],
+        force: bool,
+        eval_window_days: int,
+        min_age_days: int,
+        limit: int,
+        effective_engine_version: str,
+        eval_config: EvaluationConfig,
+        neutral_band_pct: float,
+    ) -> Dict[str, Any]:
         candidates = self.repo.get_candidates(
             code=code,
             min_age_days=int(min_age_days),
@@ -79,6 +150,7 @@ class BacktestService:
         completed = 0
         insufficient = 0
         errors = 0
+        data_quality = 0
         touched_codes: set[str] = set()
 
         results_to_save: List[BacktestResult] = []
@@ -141,6 +213,32 @@ class BacktestService:
                         eval_window_days=int(eval_window_days),
                     )
 
+                # 拆股/并股会在日线里留下 ±45% 以上的假跳变；这种窗口不能当真实收益回测。
+                if self._has_suspicious_jump(
+                    forward_bars, reference_close=start_daily.close
+                ):
+                    data_quality += 1
+                    logger.warning(
+                        "回测跳过疑似拆股/并股窗口: %s#%s %s",
+                        analysis.code,
+                        analysis.id,
+                        start_daily.date,
+                    )
+                    results_to_save.append(
+                        BacktestResult(
+                            analysis_history_id=analysis.id,
+                            code=analysis.code,
+                            analysis_date=start_daily.date,
+                            eval_window_days=int(eval_window_days),
+                            engine_version=effective_engine_version,
+                            eval_status="data_quality",
+                            evaluated_at=datetime.now(),
+                            operation_advice=analysis.operation_advice,
+                            strategy_id=getattr(analysis, "strategy_id", None),
+                        )
+                    )
+                    continue
+
                 evaluation = BacktestEngine.evaluate_single(
                     operation_advice=analysis.operation_advice,
                     analysis_date=start_daily.date,
@@ -177,6 +275,21 @@ class BacktestService:
                     )
 
                 status = evaluation.get("eval_status")
+                benchmark_return: Optional[float] = None
+                excess_return: Optional[float] = None
+                if status == "completed" and forward_bars:
+                    benchmark_return = self.benchmark.return_pct(
+                        get_market_for_stock(analysis.code) or "cn",
+                        start_daily.date,
+                        forward_bars[-1].date,
+                    )
+                    if (
+                        benchmark_return is not None
+                        and evaluation.get("stock_return_pct") is not None
+                    ):
+                        excess_return = round(
+                            float(evaluation["stock_return_pct"]) - benchmark_return, 2
+                        )
                 if status == "insufficient_data":
                     insufficient += 1
                 elif status == "completed":
@@ -190,7 +303,7 @@ class BacktestService:
                         code=analysis.code,
                         analysis_date=evaluation.get("analysis_date"),
                         eval_window_days=int(evaluation.get("eval_window_days") or eval_window_days),
-                        engine_version=str(evaluation.get("engine_version") or engine_version),
+                        engine_version=str(evaluation.get("engine_version") or effective_engine_version),
                         eval_status=str(evaluation.get("eval_status") or "error"),
                         evaluated_at=datetime.now(),
                         operation_advice=evaluation.get("operation_advice"),
@@ -220,6 +333,13 @@ class BacktestService:
                         simulated_exit_price=evaluation.get("simulated_exit_price"),
                         simulated_exit_reason=evaluation.get("simulated_exit_reason"),
                         simulated_return_pct=evaluation.get("simulated_return_pct"),
+                        simulated_return_pct_gross=evaluation.get("simulated_return_pct_gross"),
+                        mfe_pct=evaluation.get("mfe_pct"),
+                        mae_pct=evaluation.get("mae_pct"),
+                        days_to_mfe=evaluation.get("days_to_mfe"),
+                        days_to_mae=evaluation.get("days_to_mae"),
+                        benchmark_return_pct=benchmark_return,
+                        excess_return_pct=excess_return,
                         strategy_id=getattr(analysis, 'strategy_id', None),
                     )
                 )
@@ -258,6 +378,7 @@ class BacktestService:
             "completed": completed,
             "insufficient": insufficient,
             "errors": errors,
+            "data_quality": data_quality,
         }
 
     def get_recent_evaluations(self, *, code: Optional[str], eval_window_days: Optional[int] = None, limit: int = 50, page: int = 1) -> Dict[str, Any]:
@@ -330,6 +451,24 @@ class BacktestService:
             return analysis.created_at.date()
         logger.warning(f"无法确定分析日期，跳过记录: {analysis.code}#{getattr(analysis, 'id', '?')}")
         return None
+
+    @staticmethod
+    def _has_suspicious_jump(
+        bars,
+        *,
+        reference_close: Optional[float] = None,
+        threshold_pct: float = 45.0,
+    ) -> bool:
+        """Detect a split/merge-sized close-to-close jump inside the window."""
+        closes = [float(bar.close) for bar in bars if getattr(bar, "close", None)]
+        if reference_close:
+            closes.insert(0, float(reference_close))
+        for previous, current in zip(closes, closes[1:]):
+            if previous <= 0:
+                continue
+            if abs((current - previous) / previous * 100) > threshold_pct:
+                return True
+        return False
 
     @staticmethod
     def _resolve_raw_advice(analysis, final_advice: Optional[str]) -> str:
@@ -523,6 +662,12 @@ class BacktestService:
             neutral_rate_pct=summary_data.get("neutral_rate_pct"),
             avg_stock_return_pct=summary_data.get("avg_stock_return_pct"),
             avg_simulated_return_pct=summary_data.get("avg_simulated_return_pct"),
+            avg_simulated_return_pct_gross=summary_data.get("avg_simulated_return_pct_gross"),
+            avg_mfe_pct=summary_data.get("avg_mfe_pct"),
+            avg_mae_pct=summary_data.get("avg_mae_pct"),
+            avg_benchmark_return_pct=summary_data.get("avg_benchmark_return_pct"),
+            avg_excess_return_pct=summary_data.get("avg_excess_return_pct"),
+            excess_win_rate_pct=summary_data.get("excess_win_rate_pct"),
             stop_loss_trigger_rate=summary_data.get("stop_loss_trigger_rate"),
             take_profit_trigger_rate=summary_data.get("take_profit_trigger_rate"),
             ambiguous_rate=summary_data.get("ambiguous_rate"),
@@ -559,6 +704,12 @@ class BacktestService:
             "neutral_rate_pct": row.neutral_rate_pct,
             "avg_stock_return_pct": row.avg_stock_return_pct,
             "avg_simulated_return_pct": row.avg_simulated_return_pct,
+            "avg_simulated_return_pct_gross": row.avg_simulated_return_pct_gross,
+            "avg_mfe_pct": row.avg_mfe_pct,
+            "avg_mae_pct": row.avg_mae_pct,
+            "avg_benchmark_return_pct": row.avg_benchmark_return_pct,
+            "avg_excess_return_pct": row.avg_excess_return_pct,
+            "excess_win_rate_pct": row.excess_win_rate_pct,
             "stop_loss_trigger_rate": row.stop_loss_trigger_rate,
             "take_profit_trigger_rate": row.take_profit_trigger_rate,
             "ambiguous_rate": row.ambiguous_rate,

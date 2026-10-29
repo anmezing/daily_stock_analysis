@@ -11,6 +11,7 @@ import os
 import tempfile
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 
 from src.config import Config
 from src.core.backtest_engine import EXECUTION_LOGIC_REVISION, OVERALL_SENTINEL_CODE
@@ -25,13 +26,26 @@ class BacktestServiceTestCase(unittest.TestCase):
         self._db_path = os.path.join(self._temp_dir.name, "test_backtest_service.db")
         self._old_env = {
             key: os.environ.get(key)
-            for key in ("ENV_FILE", "DATABASE_URL", "DATABASE_PATH", "BACKTEST_ENTRY_MODE")
+            for key in (
+                "ENV_FILE",
+                "DATABASE_URL",
+                "DATABASE_PATH",
+                "BACKTEST_ENTRY_MODE",
+                "BACKTEST_EVAL_WINDOW_DAYS",
+                "BACKTEST_EXTRA_WINDOWS",
+                "BACKTEST_SLIPPAGE_BPS",
+                "BACKTEST_BENCHMARK_ENABLED",
+            )
         }
         os.environ["ENV_FILE"] = os.path.join(self._temp_dir.name, "empty.env")
         os.environ.pop("DATABASE_URL", None)
         os.environ.pop("BACKTEST_ENTRY_MODE", None)
         os.environ["DATABASE_PATH"] = self._db_path
         os.environ["BACKTEST_EVAL_WINDOW_DAYS"] = "3"
+        os.environ["BACKTEST_EXTRA_WINDOWS"] = ""
+        # 这些用例验证执行逻辑，不把成本模型混进来；成本单独测。
+        os.environ["BACKTEST_SLIPPAGE_BPS"] = "0"
+        os.environ["BACKTEST_BENCHMARK_ENABLED"] = "false"
 
         Config._instance = None
         DatabaseManager.reset_instance()
@@ -414,6 +428,114 @@ class BacktestServiceTestCase(unittest.TestCase):
         summary = service.get_summary(scope="overall", code=None)
         self.assertEqual(summary["calibration_lift_pct"], 100.0)
         self.assertEqual(summary["calibration_sample_count"], 1)
+
+    def test_transaction_costs_reduce_net_return(self) -> None:
+        """佣金/滑点必须从模拟收益里扣掉，而不是只展示毛收益。"""
+        from src.config import get_config
+
+        cfg = get_config()
+        with patch("src.services.backtest_service.get_config", return_value=cfg), \
+             patch.object(cfg, "backtest_slippage_bps", 5.0):
+            BacktestService(db_manager=self.db).run_backtest()
+
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "600519")
+                .one()
+            )
+            self.assertAlmostEqual(row.simulated_return_pct_gross, 10.0)
+            self.assertAlmostEqual(row.simulated_return_pct, 9.9)
+
+    def test_path_metrics_record_mfe_and_mae(self) -> None:
+        BacktestService(db_manager=self.db).run_backtest()
+
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "600519")
+                .one()
+            )
+            self.assertIsNotNone(row.mfe_pct)
+            self.assertIsNotNone(row.mae_pct)
+            self.assertGreaterEqual(row.days_to_mfe or 0, 1)
+            self.assertGreater(row.mfe_pct, 0)
+
+    def test_benchmark_excess_return_is_recorded(self) -> None:
+        with patch(
+            "src.services.benchmark_service.BenchmarkService.return_pct",
+            return_value=3.0,
+        ):
+            service = BacktestService(db_manager=self.db)
+            service.run_backtest()
+
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "600519")
+                .one()
+            )
+            self.assertEqual(row.benchmark_return_pct, 3.0)
+            self.assertAlmostEqual(row.excess_return_pct, round(row.stock_return_pct - 3.0, 2))
+
+        summary = service.get_summary(scope="overall", code=None)
+        self.assertEqual(summary["avg_benchmark_return_pct"], 3.0)
+        self.assertIsNotNone(summary["avg_excess_return_pct"])
+        self.assertIsNotNone(summary["excess_win_rate_pct"])
+
+    def test_multi_window_evaluates_each_horizon(self) -> None:
+        """同一批信号按 1/3/5 日分别评估，短窗口完成、长窗口数据不足。"""
+        from src.config import get_config
+
+        cfg = get_config()
+        with patch.object(cfg, "backtest_extra_windows", "1,5"), \
+             patch.object(BacktestService, "_try_fill_daily_data", return_value=None):
+            stats = BacktestService(db_manager=self.db).run_backtest()
+
+        self.assertEqual(stats["windows"], [1, 3, 5])
+        self.assertEqual(stats["processed"], 3)
+        self.assertEqual(stats["completed"], 2)
+        self.assertEqual(stats["insufficient"], 1)
+
+    def test_split_sized_jump_is_not_backtested_as_return(self) -> None:
+        """2:1 拆股会在日线里留下 -50%，不能当成真实亏损/收益回测。"""
+        with self.db.get_session() as session:
+            session.add(
+                AnalysisHistory(
+                    query_id="q-split",
+                    code="000006",
+                    name="拆股样本",
+                    report_type="simple",
+                    sentiment_score=70,
+                    operation_advice="买入",
+                    trend_prediction="看多",
+                    analysis_summary="split",
+                    raw_result='{"model_used": "gemini/gemini-2.5-flash", "success": true}',
+                    created_at=datetime(2024, 1, 1, 0, 0, 0),
+                    context_snapshot='{"enhanced_context": {"date": "2024-01-01"}}',
+                )
+            )
+            session.add(
+                StockDaily(code="000006", date=date(2024, 1, 1), open=100.0, high=101.0, low=99.0, close=100.0)
+            )
+            session.add_all([
+                StockDaily(code="000006", date=date(2024, 1, 2), open=50.0, high=51.0, low=49.0, close=50.0),
+                StockDaily(code="000006", date=date(2024, 1, 3), open=50.0, high=52.0, low=50.0, close=51.0),
+                StockDaily(code="000006", date=date(2024, 1, 4), open=51.0, high=53.0, low=51.0, close=52.0),
+            ])
+            session.commit()
+
+        stats = BacktestService(db_manager=self.db).run_backtest()
+
+        self.assertEqual(stats["data_quality"], 1)
+        with self.db.get_session() as session:
+            row = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == "000006")
+                .one()
+            )
+            self.assertEqual(row.eval_status, "data_quality")
+            self.assertIsNone(row.stock_return_pct)
 
     def test_agent_snapshot_analysis_date_is_parsed(self) -> None:
         """Agent 链路没有 enhanced_context，也要能从 analysis_date 定位信号日。"""

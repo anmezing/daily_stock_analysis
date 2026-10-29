@@ -51,6 +51,8 @@ class BacktestRepository:
             return False
         if payload.get("success") is False:
             return False
+        if payload.get("numeric_consistency") is False:
+            return False
         if str(payload.get("parse_mode") or "structured").strip().lower() in {
             "text_fallback",
             "truncated",
@@ -89,7 +91,7 @@ class BacktestRepository:
                     and_(
                         BacktestResult.eval_window_days == eval_window_days,
                         BacktestResult.engine_version == engine_version,
-                        BacktestResult.eval_status == "completed",
+                        BacktestResult.eval_status.in_(["completed", "data_quality"]),
                     )
                 )
                 query = query.where(AnalysisHistory.id.not_in(existing_ids))

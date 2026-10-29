@@ -622,16 +622,17 @@ The backtesting module automatically validates historical AI analysis records ag
 
 > If the next-bar open already gaps through a take-profit/stop-loss, the trade exits at that open (`gap_stop` / `gap_take_profit`) instead of discarding the target and holding to window end.
 > Incomplete rows (`insufficient_data` / `error`) are retried on later runs; `force` is not required.
-> The stored engine version carries a logic revision suffix (e.g. `v1@no-x2`) so old and new metric definitions never share one summary.
+> The stored engine version carries a logic revision suffix (e.g. `v1@no-x3`) so old and new metric definitions never share one summary.
 
 ### Operation Advice Mapping
 
 | Operation Advice | Position | Expected Direction | Direction Check (`direction_correct`) |
 |-----------------|----------|-------------------|---------------|
-| Buy / Add / Strong Buy | long | up | End-of-window return >= neutral band |
-| Sell / Reduce / Strong Sell | cash | down | End-of-window decline >= neutral band |
+| Buy / Add / Accumulate / Strong Buy | long | up | End-of-window return >= neutral band |
 | Hold | long | not_down | No significant end-of-window decline |
-| Wait / Observe | cash | flat | End-of-window price within neutral band |
+| **Wait / Observe** | cash | **not_up** | No significant end-of-window rally (avoiding a drop counts as correct) |
+| **Reduce / Take-profit / Stop-loss** | cash | **not_up** | Same — exposure management, not a bearish call |
+| Sell / Liquidate / Strong Sell | cash | down | End-of-window decline >= neutral band |
 
 > `outcome` and `win_rate_pct` describe **simulated long executions only** (stop-loss/take-profit, gap fills). Cash signals place no trade and are excluded from the execution win rate. Their advice quality shows up in `direction_accuracy_pct` and `advice_breakdown`.
 

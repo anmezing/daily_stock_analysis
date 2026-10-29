@@ -667,6 +667,39 @@ class LLMUsage(Base):
     called_at = Column(DateTime, default=datetime.now, index=True)
 
 
+def _install_postgres_read_write_handler(engine) -> None:
+    """确保 PostgreSQL 连接可以写入。
+
+    托管连接池（例如 Supabase 的 pooler）会在建立会话时下发
+    ``default_transaction_read_only = on``，于是所有写入直接失败：
+    ``cannot execute UPDATE/INSERT in a read-only transaction``。
+    该值只是会话默认值，连接建立后可以显式关闭。
+
+    这里只在检测到默认值为 on 时才发送 SET，正常数据库上等价于空操作。
+    """
+    if getattr(engine.dialect, "name", "") != "postgresql":
+        return
+
+    @event.listens_for(engine, "connect")
+    def _enable_writes(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        previous_autocommit = getattr(dbapi_connection, "autocommit", False)
+        try:
+            dbapi_connection.autocommit = True
+            cursor.execute("SHOW default_transaction_read_only")
+            row = cursor.fetchone()
+            if row and str(row[0]).strip().lower() == "on":
+                cursor.execute("SET default_transaction_read_only = off")
+                logger.warning(
+                    "数据库会话默认只读（常见于托管连接池），已在连接建立时关闭以允许写入"
+                )
+        except Exception as exc:
+            logger.debug("关闭 PostgreSQL 只读会话失败: %s", exc)
+        finally:
+            cursor.close()
+            dbapi_connection.autocommit = previous_autocommit
+
+
 class DatabaseManager:
     """
     数据库管理器 - 单例模式
@@ -725,6 +758,8 @@ class DatabaseManager:
         self._sqlite_file_db = self._is_sqlite_engine and self._is_file_sqlite_database()
         if self._is_sqlite_engine:
             self._install_sqlite_pragma_handler(self._engine)
+        else:
+            _install_postgres_read_write_handler(self._engine)
         
         # 创建 Session 工厂
         self._SessionLocal = sessionmaker(
@@ -780,7 +815,6 @@ class DatabaseManager:
         """Install SQLite pragmas for better concurrency on every new connection."""
         if getattr(engine.dialect, "name", "") != "sqlite":
             return
-
         @event.listens_for(engine, "connect")
         def _set_sqlite_pragmas(dbapi_connection, _connection_record):
             cursor = dbapi_connection.cursor()

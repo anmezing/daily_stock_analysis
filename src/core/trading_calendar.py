@@ -13,7 +13,7 @@
 """
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional, Set
 
 logger = logging.getLogger(__name__)

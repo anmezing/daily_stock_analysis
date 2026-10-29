@@ -17,11 +17,21 @@ for _mod in ("litellm", "json_repair", "markdown2", "newspaper"):
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.analyzer import AnalysisResult
+from src.core.backtest_engine import BacktestEngine
 from src.core.pipeline import StockAnalysisPipeline
 from src.enums import ReportType
 from src.services.analysis_calibration_model import SmallCalibrationModel
 from src.services.analysis_calibration_service import AnalysisCalibrationService
+from src.services.backtest_service import BacktestService
 from src.storage import AnalysisHistory, BacktestResult, DatabaseManager
+
+
+def _learning_engine_version() -> str:
+    """与 BacktestService 写入时一致的引擎版本号（学习样本只吃当前版本）。"""
+    return BacktestService._effective_engine_version(
+        "v1",
+        BacktestEngine._normalize_entry_mode("next_open"),
+    )
 
 
 class AnalysisCalibrationServiceTestCase(unittest.TestCase):
@@ -140,7 +150,7 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
                     analysis_history_id=history.id,
                     code=code,
                     eval_window_days=10,
-                    engine_version="v1",
+                    engine_version=_learning_engine_version(),
                     eval_status="completed",
                     evaluated_at=created_at,
                     operation_advice=advice_map[signal],
@@ -235,6 +245,43 @@ class AnalysisCalibrationServiceTestCase(unittest.TestCase):
         self.assertTrue(calibrated.calibration_info.get("applied"))
         self.assertEqual(calibrated.calibration_info.get("source_scope"), "市场+模型")
         self.assertGreaterEqual(calibrated.sentiment_score, 60)
+
+    def test_learning_rows_exclude_old_engine_versions(self) -> None:
+        """旧引擎版本的回测样本不能进入学习集，否则新旧口径互相矛盾。"""
+        current_code = "AAPL"
+        stale_code = "TSLA"
+        self._insert_learning_record(
+            query_id="q-current",
+            code=current_code,
+            signal="buy",
+            direction_correct=True,
+            simulated_return_pct=3.0,
+            stock_return_pct=3.0,
+        )
+        self._insert_learning_record(
+            query_id="q-stale",
+            code=stale_code,
+            signal="buy",
+            direction_correct=False,
+            simulated_return_pct=-4.0,
+            stock_return_pct=-4.0,
+        )
+
+        # 把其中一条改写成旧口径版本号
+        with self.db.get_session() as session:
+            stale = (
+                session.query(BacktestResult)
+                .filter(BacktestResult.code == stale_code)
+                .one()
+            )
+            stale.engine_version = "v1"
+            session.commit()
+
+        service = AnalysisCalibrationService(db_manager=self.db, config=self.config)
+        rows = service._load_learning_rows()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], current_code)
 
     def test_maybe_refresh_backtests_respects_cooldown(self) -> None:
         service = AnalysisCalibrationService(db_manager=self.db, config=self.config, time_fn=lambda: 1000.0)

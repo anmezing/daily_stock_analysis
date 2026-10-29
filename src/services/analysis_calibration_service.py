@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from sqlalchemy import desc, select
 
+from src.core.backtest_engine import BacktestEngine
 from src.core.trading_calendar import get_market_for_stock
 from src.services.analysis_calibration_model import SmallCalibrationModel
 from src.services.backtest_service import BacktestService
@@ -1075,16 +1076,38 @@ class AnalysisCalibrationService:
             avg_return=avg_return,
         )
 
+    def _learning_engine_version(self) -> str:
+        """返回当前生效的回测引擎版本，用于过滤学习样本。
+
+        必须与 ``BacktestService`` 写入时的版本号算法一致，否则过滤条件会
+        永远匹配不到任何行（例如漏掉 entry_mode 后缀）。
+        """
+        raw_version = getattr(self.config, "backtest_engine_version", None)
+        base_version = raw_version.strip() if isinstance(raw_version, str) and raw_version.strip() else "v1"
+        raw_mode = getattr(self.config, "backtest_entry_mode", None)
+        entry_mode = raw_mode if isinstance(raw_mode, str) else "next_open"
+        return BacktestService._effective_engine_version(
+            base_version,
+            BacktestEngine._normalize_entry_mode(entry_mode),
+        )
+
     def _load_learning_rows(self) -> List[Dict[str, Any]]:
         if not self.enabled:
             return []
 
         history_limit = int(getattr(self.config, "analysis_learning_history_limit", _DEFAULT_HISTORY_LIMIT))
+        engine_version = self._learning_engine_version()
         with self.db.get_session() as session:
             pairs = session.execute(
                 select(BacktestResult, AnalysisHistory)
                 .join(AnalysisHistory, AnalysisHistory.id == BacktestResult.analysis_history_id)
-                .where(BacktestResult.eval_status == "completed")
+                .where(
+                    BacktestResult.eval_status == "completed",
+                    # 只吃当前引擎版本的样本：旧版本用的是修复前的口径
+                    # （long 结果按期末涨跌、现金收益记 0、缺口不成交），
+                    # 和新口径混在一起训练会学到互相矛盾的映射。
+                    BacktestResult.engine_version == engine_version,
+                )
                 .order_by(desc(BacktestResult.evaluated_at))
                 .limit(history_limit)
             ).all()

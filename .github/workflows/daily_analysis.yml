@@ -107,11 +107,15 @@ jobs:
           LITELLM_FALLBACK_MODELS: ${{ vars.LITELLM_FALLBACK_MODELS || secrets.LITELLM_FALLBACK_MODELS }}
 
           # Gemini AI（主选）
+          # 免费档限流按「项目」计，不按 Key 计：多 Key 只有来自不同 Google Cloud 项目才有效。
+          # Gemini 3 Flash 免费档约 10 RPM / 1500 RPD，瓶颈在 RPM，因此用 REQUEST_DELAY 控制节奏。
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
           GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
-          GEMINI_REQUEST_DELAY: '3.0'
+          GEMINI_REQUEST_DELAY: ${{ vars.GEMINI_REQUEST_DELAY || '7.0' }}
+          # 429 时最多重试 2 次（默认 5 次会白等，且每日额度耗尽时重试无意义）
+          GEMINI_MAX_RETRIES: ${{ vars.GEMINI_MAX_RETRIES || '2' }}
           
           # AIHubMix（优先于 OPENAI_API_KEY，自动适配 base_url，推荐国内用户）
           AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}

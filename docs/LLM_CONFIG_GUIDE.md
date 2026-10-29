@@ -40,6 +40,25 @@ LITELLM_MODEL=openai/deepseek-ai/DeepSeek-V3
 LLM_EXTRA_HEADERS={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"}
 ```
 
+### 示例 1.1：用 OpenRouter 免费模型做兜底（省钱）
+
+OpenRouter 提供一批带 `:free` 后缀的免费模型，格式同样兼容 OpenAI。它最适合放在**兜底位**——主模型额度打满时接管，平时不消耗：
+
+```env
+# 1) 用 OpenRouter 的 Key 填充最低优先级的 OpenAI 兼容槽位
+OPENAI_API_KEY=sk-or-v1-xxxxxxxxxxxxxxxx
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+
+# 2) 免费模型放在 fallback，主模型仍走 Gemini 等
+LITELLM_FALLBACK_MODELS=openai/nvidia/nemotron-3-ultra-550b-a55b:free
+```
+
+注意两点：
+
+- 模型 ID **必须带 `openai/` 前缀**。OpenRouter 的 ID 自带 `厂商/模型` 斜杠，不加前缀会被 LiteLLM 当成厂商路由（例如把 `nvidia` 当 provider），直接报错。
+- 想让免费模型当**主模型**时，把同样的字符串写进 `LITELLM_MODEL` 即可，不要写进 `OPENAI_MODEL`（后者只在没有更靠前的 provider Key 时才参与推断）。
+- OpenCode 自家的免费模型**不能**这样接：官方文档明确外部客户端一律返回 HTTP 403，只允许在 OpenCode 客户端内使用。
+
 ### 示例 2：使用 DeepSeek 官方接口
 ```env
 # 填入你在 DeepSeek 官方平台申请的 API Key

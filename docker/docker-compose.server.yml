@@ -56,7 +56,9 @@ services:
     env_file:
       - ../.env
     environment:
-      - TZ=Asia/Shanghai
+      # US market schedule: SCHEDULE_TIME is interpreted in this timezone.
+      # Set SCHEDULE_TIME=10:00 in .env for 10:00 ET; DST handled by tzdata.
+      - TZ=America/New_York
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs

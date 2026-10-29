@@ -611,6 +611,23 @@ docker compose -f docker/docker-compose.server.yml up -d --build
 pg_dump -U dsa -d dsa -Fc > /backup/dsa-$(date +%F).dump
 ```
 
+### 10. 甲骨文云 ARM（Ubuntu）补充
+
+- **安全列表**：OCI 控制台 → VCN → Security List / NSG，添加入站 `22`（你的 IP）、`80`、`443`（0.0.0.0/0）；只开这三个端口。
+- **保留公网 IP**：实例的临时公网 IP 在停止/启动后可能变化，绑定 Reserved Public IP 并指向域名。
+- **Ubuntu 防火墙**：Oracle 的 Ubuntu 镜像默认用 iptables，末尾有一条 `REJECT`。不要只开 ufw：
+  ```bash
+  sudo iptables -L INPUT -n --line-numbers   # 确认 REJECT 在最后
+  sudo iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT
+  sudo iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT
+  sudo apt install -y iptables-persistent
+  sudo netfilter-persistent save
+  ```
+  如果系统已启用 ufw，则改用 `ufw allow 80,443/tcp`，不要两套规则混用。
+- **ARM 构建**：`node:20-slim` / `python:3.11-slim-bookworm` 都有 arm64 镜像；Dockerfile 已把 `wkhtmltopdf` 改为可选，ARM 上缺失时图片推送自动回退文本，不影响构建。
+- **PostgreSQL**：Ubuntu 24.04 是 16、22.04 是 14，配置路径 `/etc/postgresql/<版本>/main/`；`psycopg2-binary` 已有 arm64 wheel。
+- **时区/调度**：`analyzer` 容器固定 `TZ=America/New_York`，在 `.env` 设 `SCHEDULE_TIME=10:00` 即美股开盘后 30 分钟；港股若也要开盘跑，用宿主机 cron 额外执行一次一次性任务。
+
 ### 9. 后续从 Supabase 迁移
 
 ```bash

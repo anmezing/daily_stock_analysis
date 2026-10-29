@@ -22,18 +22,38 @@ class TestAnalyzerMarketPrompt(unittest.TestCase):
         analyzer._litellm_available = False
         return analyzer
 
-    def test_system_prompt_mentions_all_markets(self) -> None:
+    def test_system_prompt_is_assembled_per_market(self) -> None:
+        """系统提示按市场拼装：公共约束一致，市场规则互不混入。"""
         analyzer = self._make_analyzer()
 
-        self.assertIn("A 股、港股和美股", analyzer.SYSTEM_PROMPT)
-        self.assertIn("China exposure", analyzer.SYSTEM_PROMPT)
-        self.assertNotIn("A 股投资分析师", analyzer.SYSTEM_PROMPT.splitlines()[0])
-        self.assertIn("A股：存在涨跌停、T+1 和做空限制", analyzer.SYSTEM_PROMPT)
-        self.assertIn("美股：不存在 A股式涨跌停/T+1 约束", analyzer.SYSTEM_PROMPT)
-        self.assertIn("美股：不存在 A股式涨跌停/T+1 约束", analyzer.SYSTEM_PROMPT)
-        self.assertIn("不能仅因离均线较远就把强趋势股直接判成看空", analyzer.SYSTEM_PROMPT)
-        self.assertIn("不强制 MA5 / MA10 模板", analyzer.SYSTEM_PROMPT)
-        self.assertIn("震荡偏多/震荡/震荡偏空", analyzer.SYSTEM_PROMPT)
+        prompts = {
+            market: analyzer.build_system_prompt(market)
+            for market in ("cn", "hk", "us")
+        }
+
+        for market, prompt in prompts.items():
+            self.assertIn("China exposure", prompt, market)
+            self.assertIn("震荡偏多/震荡/震荡偏空", prompt, market)
+            self.assertIn("null", prompt, market)
+            self.assertIn("只用给定数据", prompt, market)
+
+        # 市场专属规则
+        self.assertIn("涨跌停、T+1、做空受限", prompts["cn"])
+        self.assertIn("不宜重仓追价", prompts["hk"])
+        self.assertIn("不能仅因离均线较远就把强趋势股直接判成看空", prompts["us"])
+        self.assertIn("不强制 MA5 / MA10 模板", prompts["us"])
+
+        # 不把其它市场的规则串进来
+        self.assertNotIn("HKEX", prompts["us"])
+        self.assertNotIn("T+1、做空受限", prompts["us"])
+        self.assertNotIn("earnings gap hold", prompts["cn"])
+
+    def test_unknown_market_falls_back_to_us_rules(self) -> None:
+        analyzer = self._make_analyzer()
+        self.assertIn(
+            "不能仅因离均线较远就把强趋势股直接判成看空",
+            analyzer.build_system_prompt("jp"),
+        )
 
     def test_us_prompt_includes_china_exposure_guidance(self) -> None:
         analyzer = self._make_analyzer()

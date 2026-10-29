@@ -68,6 +68,8 @@ class SearchNewsFreshnessTestCase(unittest.TestCase):
         service = SearchService(
             bocha_keys=["dummy_key"],
             searxng_public_instances_enabled=False,
+            finnhub_keys=[],
+            rss_news_enabled=False,
             news_max_age_days=news_max_age_days,
             news_strategy_profile=news_strategy_profile,
         )

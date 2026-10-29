@@ -12,10 +12,11 @@ A股自选股智能分析系统 - 搜索服务模块
 """
 
 import logging
-import random
+import os
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -158,7 +159,11 @@ class SearchResponse:
 
 class BaseSearchProvider(ABC):
     """搜索引擎基类"""
-    
+
+    # 是否支持按股票代码直接查询（例如 Finnhub 的公司新闻接口）。
+    # 开启后 search() 会把 stock_code 透传给 _do_search。
+    supports_stock_lookup: bool = False
+
     def __init__(self, api_keys: List[str], name: str):
         """
         初始化搜索引擎
@@ -220,7 +225,7 @@ class BaseSearchProvider(ABC):
         """执行搜索（子类实现）"""
         pass
     
-    def search(self, query: str, max_results: int = 5, days: int = 7) -> SearchResponse:
+    def search(self, query: str, max_results: int = 5, days: int = 7, stock_code: Optional[str] = None) -> SearchResponse:
         """
         执行搜索
         
@@ -228,6 +233,7 @@ class BaseSearchProvider(ABC):
             query: 搜索关键词
             max_results: 最大返回结果数
             days: 搜索最近几天的时间范围（默认7天）
+            stock_code: 股票代码（仅 supports_stock_lookup 为 True 的引擎使用）
             
         Returns:
             SearchResponse 对象
@@ -244,7 +250,12 @@ class BaseSearchProvider(ABC):
         
         start_time = time.time()
         try:
-            response = self._do_search(query, api_key, max_results, days=days)
+            if self.supports_stock_lookup:
+                response = self._do_search(
+                    query, api_key, max_results, days=days, stock_code=stock_code
+                )
+            else:
+                response = self._do_search(query, api_key, max_results, days=days)
             response.search_time = time.time() - start_time
             
             if response.success:
@@ -1625,6 +1636,214 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class FinnhubNewsProvider(BaseSearchProvider):
+    """Finnhub 公司新闻接口（免费档含近 1 年 + 实时，60 次/分钟）。
+
+    直接按股票代码取公司新闻，比通用网页搜索更精准，也不占用其它搜索额度。
+    文档：https://finnhub.io/docs/api/company-news
+    """
+
+    API_ENDPOINT = "https://finnhub.io/api/v1/company-news"
+    supports_stock_lookup = True
+
+    def __init__(self, api_keys: List[str]):
+        super().__init__(api_keys, "FinnhubNews")
+
+    @staticmethod
+    def _to_finnhub_symbol(stock_code: Optional[str]) -> Optional[str]:
+        """把内部代码转成 Finnhub 认识的 symbol（港股需要 0700.HK 形式）。"""
+        if not stock_code:
+            return None
+        code = str(stock_code).strip().upper()
+        if not code:
+            return None
+        if code.endswith(".HK"):
+            return code
+        if code.startswith("HK"):
+            digits = code[2:].lstrip("0") or "0"
+            return f"{digits.zfill(4)}.HK"
+        if code.isdigit() and len(code) <= 5:
+            digits = code.lstrip("0") or "0"
+            return f"{digits.zfill(4)}.HK"
+        return code
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        stock_code: Optional[str] = None,
+    ) -> SearchResponse:
+        symbol = self._to_finnhub_symbol(stock_code)
+        if not symbol:
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message="缺少股票代码，跳过 Finnhub 公司新闻",
+            )
+
+        end = datetime.now()
+        # 多取几天，最终窗口由上层按 news_max_age_days 过滤
+        start = end - timedelta(days=max(int(days or 7), 1) + 7)
+        params = {
+            "symbol": symbol,
+            "from": start.strftime("%Y-%m-%d"),
+            "to": end.strftime("%Y-%m-%d"),
+            "token": api_key,
+        }
+
+        try:
+            response = requests.get(self.API_ENDPOINT, params=params, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=f"Finnhub 请求失败: {exc}",
+            )
+
+        if not isinstance(payload, list):
+            message = payload.get("error") if isinstance(payload, dict) else payload
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=f"Finnhub 返回异常: {message}",
+            )
+
+        results: List[SearchResult] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            headline = str(item.get("headline") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if not headline or not url:
+                continue
+            published_date = None
+            timestamp = item.get("datetime")
+            if isinstance(timestamp, (int, float)) and timestamp > 0:
+                published_date = datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                ).strftime("%Y-%m-%d")
+            results.append(
+                SearchResult(
+                    title=headline,
+                    snippet=str(item.get("summary") or "").strip(),
+                    url=url,
+                    source=str(item.get("source") or "Finnhub").strip(),
+                    published_date=published_date,
+                )
+            )
+            if len(results) >= max_results:
+                break
+
+        return SearchResponse(
+            query=query,
+            results=results,
+            provider=self._name,
+            success=True,
+            metadata={"symbol": symbol},
+        )
+
+
+class RSSNewsProvider(BaseSearchProvider):
+    """Google News RSS：免注册、无 API Key、无额度上限。
+
+    作为最后一个兜底源，避免所有付费搜索源同时失效时情报维度全空。
+    实测美股单次可返回 100 条，港股按代码搜索约 18-30 条。
+    """
+
+    GOOGLE_NEWS_ENDPOINT = "https://news.google.com/rss/search"
+    USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    )
+
+    def __init__(self):
+        # 无 Key 引擎仍复用基类的轮询逻辑，这里给一个占位 key
+        super().__init__(["rss-no-key"], "GoogleNewsRSS")
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+        stock_code: Optional[str] = None,
+    ) -> SearchResponse:
+        params = {
+            "q": query,
+            "hl": "en-US",
+            "gl": "US",
+            "ceid": "US:en",
+        }
+        try:
+            response = requests.get(
+                self.GOOGLE_NEWS_ENDPOINT,
+                params=params,
+                headers={"User-Agent": self.USER_AGENT},
+                timeout=10,
+            )
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+        except Exception as exc:  # noqa: BLE001
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self._name,
+                success=False,
+                error_message=f"Google News RSS 失败: {exc}",
+            )
+
+        results: List[SearchResult] = []
+        for item in root.iter("item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            if not title or not link:
+                continue
+            source_el = item.find("source")
+            source = (source_el.text or "").strip() if source_el is not None else "Google News"
+            results.append(
+                SearchResult(
+                    title=title,
+                    snippet=self._clean_description(item.findtext("description")),
+                    url=link,
+                    source=source or "Google News",
+                    published_date=self._parse_pub_date(item.findtext("pubDate")),
+                )
+            )
+            if len(results) >= max_results:
+                break
+
+        return SearchResponse(query=query, results=results, provider=self._name, success=True)
+
+    @staticmethod
+    def _parse_pub_date(value: Optional[str]) -> Optional[str]:
+        """RSS 的 RFC822 时间转成 YYYY-MM-DD。"""
+        if not value:
+            return None
+        try:
+            return parsedate_to_datetime(value.strip()).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _clean_description(value: Optional[str]) -> str:
+        """去掉 RSS description 里的 HTML 标签，截断过长摘要。"""
+        if not value:
+            return ""
+        text = re.sub(r"<[^>]+>", " ", value)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:300]
+
+
 class AnspireSearchProvider(BaseSearchProvider):
     """
     Anspire Search 搜索引擎
@@ -2108,6 +2327,20 @@ class SearchService:
     NEWS_OVERSAMPLE_MAX = 10
     FUTURE_TOLERANCE_DAYS = 1
     
+    @staticmethod
+    def _resolve_finnhub_keys(finnhub_keys: Optional[List[str]]) -> List[str]:
+        if finnhub_keys is not None:
+            return [key.strip() for key in finnhub_keys if key and key.strip()]
+        raw = (os.getenv("FINNHUB_API_KEY") or "").strip()
+        return [raw] if raw else []
+
+    @staticmethod
+    def _resolve_rss_enabled(rss_news_enabled: Optional[bool]) -> bool:
+        if rss_news_enabled is not None:
+            return bool(rss_news_enabled)
+        raw = (os.getenv("NEWS_RSS_ENABLED", "true") or "true").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
     def __init__(
         self,
         bocha_keys: Optional[List[str]] = None,
@@ -2120,6 +2353,8 @@ class SearchService:
         xai_search_model: str = "grok-4-1-fast-reasoning",
         searxng_base_urls: Optional[List[str]] = None,
         searxng_public_instances_enabled: bool = True,
+        finnhub_keys: Optional[List[str]] = None,
+        rss_news_enabled: Optional[bool] = None,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
     ):
@@ -2137,11 +2372,15 @@ class SearchService:
             xai_search_model: xAI X Search 使用的模型
             searxng_base_urls: SearXNG 实例地址列表（自建无配额兜底）
             searxng_public_instances_enabled: 未配置自建实例时，是否自动使用公共 SearXNG 实例
+            finnhub_keys: Finnhub API Key 列表；未传时回退读取 FINNHUB_API_KEY
+            rss_news_enabled: 是否启用 Google News RSS 兜底；未传时读取 NEWS_RSS_ENABLED（默认开启）
             news_max_age_days: 新闻最大时效（天）
             news_strategy_profile: 新闻窗口策略档位（ultra_short/short/medium/long）
         """
         self._providers: List[BaseSearchProvider] = []
         self._x_signal_provider: Optional[XAIXSearchProvider] = None
+        self._finnhub_keys = self._resolve_finnhub_keys(finnhub_keys)
+        self._rss_news_enabled = self._resolve_rss_enabled(rss_news_enabled)
         self.news_max_age_days = max(1, news_max_age_days)
         raw_profile = (news_strategy_profile or "short").strip().lower()
         self.news_strategy_profile = normalize_news_strategy_profile(news_strategy_profile)
@@ -2206,6 +2445,16 @@ class SearchService:
         if anspire_keys:
             self._providers.insert(0, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
+
+        # 8. Finnhub 公司新闻（复用已有 FINNHUB_API_KEY，按代码直查，免费档 60 次/分钟）
+        if self._finnhub_keys:
+            self._providers.append(FinnhubNewsProvider(self._finnhub_keys))
+            logger.info("已配置 Finnhub 公司新闻，共 %s 个 API Key", len(self._finnhub_keys))
+
+        # 9. Google News RSS：免 Key、无额度，始终作为最后兜底
+        if self._rss_news_enabled:
+            self._providers.append(RSSNewsProvider())
+            logger.info("已启用 Google News RSS 兜底搜索（无需 API Key）")
 
         if not self._providers:
             logger.warning("未配置任何搜索能力，新闻搜索功能将不可用")
@@ -2568,6 +2817,7 @@ class SearchService:
         provider_index: int,
         *,
         max_results: int = 3,
+        stock_code: Optional[str] = None,
     ) -> Tuple[SearchResponse, int]:
         available_providers = [p for p in self._providers if p.is_available]
         if not available_providers:
@@ -2576,8 +2826,34 @@ class SearchService:
         provider = available_providers[provider_index % len(available_providers)]
         provider_index += 1
         logger.info(f"[情报搜索] 使用 {provider.name}: {query}")
-        response = provider.search(query, max_results=max_results, days=self.news_max_age_days)
+        response = self._provider_search(
+            provider,
+            query,
+            max_results=max_results,
+            days=self.news_max_age_days,
+            stock_code=stock_code,
+        )
         return response, provider_index
+
+    @staticmethod
+    def _provider_search(
+        provider: BaseSearchProvider,
+        query: str,
+        *,
+        max_results: int,
+        days: int,
+        stock_code: Optional[str] = None,
+        **extra_kwargs: Any,
+    ) -> SearchResponse:
+        """统一调用 provider.search。
+
+        部分引擎（如 Tavily）自己重写了 search()，签名里没有 stock_code，
+        所以只有声明 supports_stock_lookup 的引擎才传入该参数。
+        """
+        kwargs: Dict[str, Any] = {"max_results": max_results, "days": days, **extra_kwargs}
+        if getattr(provider, "supports_stock_lookup", False):
+            kwargs["stock_code"] = stock_code
+        return provider.search(query, **kwargs)
 
     def _recent_day_range(self, lookback_days: int = 180) -> Tuple[str, str]:
         end = datetime.now()
@@ -3590,17 +3866,21 @@ class SearchService:
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
-                response = provider.search(
+                response = self._provider_search(
+                    provider,
                     dim['query'],
                     max_results=provider_max_results,
                     days=search_days,
+                    stock_code=stock_code,
                     topic=dim['tavily_topic'],
                 )
             else:
-                response = provider.search(
+                response = self._provider_search(
+                    provider,
                     dim['query'],
                     max_results=provider_max_results,
                     days=search_days,
+                    stock_code=stock_code,
                 )
             if dim.get('strict_freshness'):
                 filtered_response = self._filter_news_response(
@@ -3636,7 +3916,9 @@ class SearchService:
                 break
             query = dim.get('query', '')
             logger.info(f"[情报搜索] {dim['desc']}: 搜索引擎回退")
-            response, provider_index = self._run_provider_search(query, provider_index, max_results=3)
+            response, provider_index = self._run_provider_search(
+                query, provider_index, max_results=3, stock_code=stock_code
+            )
             if response is not None:
                 results[dim['name']] = response
             time.sleep(0.5)

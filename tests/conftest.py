@@ -32,6 +32,8 @@ def _isolate_test_environment() -> None:
     os.environ["ENV_FILE"] = str(empty_env)
     os.environ["DATABASE_URL"] = ""
     os.environ.setdefault("DATABASE_PATH", str(workdir / "dsa_test.db"))
+    # 测试不应真的访问新闻源；需要测 RSS 的用例自行显式开启
+    os.environ.setdefault("NEWS_RSS_ENABLED", "false")
 
 
 _isolate_test_environment()

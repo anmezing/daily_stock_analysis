@@ -250,3 +250,47 @@ def test_regime_block_warns_in_risk_off():
     assert "市场状态（基准指数）" in prompt
     assert "risk-off" in prompt
     assert "200日线下方" in prompt
+
+
+def test_analysis_date_is_separate_from_stale_bar_date():
+    """数据过期时，分析日期仍应是今天，而不是最后一根 K 线的日期。"""
+    prompt = _analyzer()._format_prompt(
+        _context(
+            analysis_date="2026-10-29",
+            today={"date": "2026-08-21", "close": 180.0},
+        ),
+        "Apple Inc.",
+    )
+
+    assert "| 分析日期 | 2026-10-29 |" in prompt
+    assert "| 行情数据日期 | 2026-08-21 |" in prompt
+
+
+def test_nan_amount_is_rendered_as_na():
+    analyzer = _analyzer()
+
+    assert analyzer._format_amount(float("nan")) == "N/A"
+    assert analyzer._format_price(float("nan")) == "N/A"
+
+
+def test_numeric_validator_flags_volume_status_conflict():
+    from src.analyzer import AnalysisResult, validate_result_numbers
+
+    result = AnalysisResult(
+        code="AAPL",
+        name="Apple Inc.",
+        sentiment_score=60,
+        trend_prediction="震荡",
+        operation_advice="持有",
+        decision_type="hold",
+        dashboard={
+            "data_perspective": {
+                "price_position": {"current_price": 180.0},
+                "volume_analysis": {"volume_ratio": 0.87, "volume_status": "放量"},
+            }
+        },
+    )
+
+    issues = validate_result_numbers(result, _context())
+
+    assert "volume_status_conflict" in issues

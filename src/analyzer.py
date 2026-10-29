@@ -848,6 +848,8 @@ class AnalysisResult:
     # ========== 价格数据（分析时快照）==========
     current_price: Optional[float] = None  # 分析时的股价
     change_pct: Optional[float] = None     # 分析时的涨跌幅(%)
+    analysis_date: Optional[str] = None    # 做出判断的日期（市场当地日期）
+    data_date: Optional[str] = None        # 技术指标所用最后一根 K 线的日期
 
     # ========== 模型标记（Issue #528）==========
     model_used: Optional[str] = None  # 分析使用的 LLM 模型（完整名，如 gemini/gemini-2.0-flash）
@@ -897,6 +899,8 @@ class AnalysisResult:
             'error_message': self.error_message,
             'current_price': self.current_price,
             'change_pct': self.change_pct,
+            'analysis_date': self.analysis_date,
+            'data_date': self.data_date,
             'model_used': self.model_used,
             'parse_mode': self.parse_mode,
             'calibration_info': self.calibration_info,
@@ -1003,6 +1007,16 @@ def validate_result_numbers(result: AnalysisResult, context: Dict[str, Any]) -> 
     if reference_price and stop_loss and take_profit and result.decision_type == "buy":
         if not (stop_loss < reference_price < take_profit):
             issues.append("target_order_invalid")
+
+    volume = perspective.get("volume_analysis") if isinstance(perspective, dict) else {}
+    volume = volume if isinstance(volume, dict) else {}
+    volume_ratio = _to_number(volume.get("volume_ratio"))
+    volume_status = str(volume.get("volume_status") or "")
+    if volume_ratio is not None:
+        if volume_ratio < 1.0 and "放量" in volume_status:
+            issues.append("volume_status_conflict")
+        elif volume_ratio >= 1.5 and "缩量" in volume_status:
+            issues.append("volume_status_conflict")
 
     return issues
 
@@ -2098,7 +2112,8 @@ class GeminiAnalyzer:
 |------|------|
 | 股票代码 | **{code}** |
 | 股票名称 | **{stock_name}** |
-| 分析日期 | {context.get('date', '未知')} |
+| 分析日期 | {context.get('analysis_date') or context.get('date', '未知')} |
+| 行情数据日期 | {self._display_optional(today.get('date'), context.get('date', '未知'))} |
 
 ---
 
@@ -2113,7 +2128,7 @@ class GeminiAnalyzer:
 ### 今日行情
 | 指标 | 数值 |
 |------|------|
-| **数据日期** | **{self._display_optional(today.get('date'), '未知')}**（若与分析日期不同，说明当日无交易数据，按最新可用交易日分析） |
+| **数据日期** | **{self._display_optional(today.get('date'), '未知')}**（若落后于分析日期，说明数据源未更新，技术指标可能不代表当前市场） |
 | {price_label} | {self._format_price(today.get('close'))} {currency} |
 | 开盘价 | {self._format_price(today.get('open'))} {currency} |
 | 最高价 | {self._format_price(today.get('high'))} {currency} |
@@ -2372,6 +2387,12 @@ class GeminiAnalyzer:
         """格式化成交额显示（市场感知，支持多币种标签）"""
         if amount is None:
             return 'N/A'
+        try:
+            amount = float(amount)
+        except (TypeError, ValueError):
+            return 'N/A'
+        if math.isnan(amount):
+            return 'N/A'
         if market == "us":
             if amount >= 1e9:
                 return f"${amount / 1e9:.2f}B"
@@ -2429,9 +2450,12 @@ class GeminiAnalyzer:
         if value is None:
             return 'N/A'
         try:
-            return f"{float(value):.2f}"
+            number = float(value)
         except (TypeError, ValueError):
             return 'N/A'
+        if math.isnan(number):
+            return 'N/A'
+        return f"{number:.2f}"
 
     def _format_ma(self, value: Optional[float]) -> str:
         """均线数值：0 / 负数视为数据不足，不要显示成 0.00。"""
@@ -2564,6 +2588,7 @@ class GeminiAnalyzer:
         currency = {"cn": "元", "hk": "港元", "us": "美元"}.get(market, "元")
         snapshot = {
             "date": context.get('date', '未知'),
+            "analysis_date": context.get('analysis_date') or context.get('date', '未知'),
             "close": self._format_price(close),
             "open": self._format_price(today.get('open')),
             "high": self._format_price(high),

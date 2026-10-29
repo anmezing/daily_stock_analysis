@@ -988,15 +988,20 @@ class NotificationService(
                             f"| MA5 | {price_data.get('ma5', 'N/A')} |",
                             f"| MA10 | {price_data.get('ma10', 'N/A')} |",
                             f"| MA20 | {price_data.get('ma20', 'N/A')} |",
-                            f"| 乖离率(MA5) | {price_data.get('bias_ma5', 'N/A')}% {bias_emoji}{bias_status} |",
+                            f"| 乖离率(MA5) | {price_data.get('bias_ma5') if price_data.get('bias_ma5') is not None else 'N/A'}{'%' if price_data.get('bias_ma5') is not None else ''} {bias_emoji}{bias_status} |",
                             f"| 支撑位 | {price_data.get('support_level', 'N/A')} |",
                             f"| 压力位 | {price_data.get('resistance_level', 'N/A')} |",
                             "",
                         ])
                     # 量能分析
                     if vol_data:
+                        turnover = vol_data.get('turnover_rate')
+                        try:
+                            turnover_text = f"{float(turnover):.2f}%" if turnover is not None else "N/A"
+                        except (TypeError, ValueError):
+                            turnover_text = "N/A"
                         report_lines.extend([
-                            f"**量能**: 量比 {vol_data.get('volume_ratio', 'N/A')} ({vol_data.get('volume_status', '')}) | 换手率 {vol_data.get('turnover_rate', 'N/A')}%",
+                            f"**量能**: 量比 {vol_data.get('volume_ratio', 'N/A')} ({vol_data.get('volume_status', '')}) | 换手率 {turnover_text}",
                             f"💡 *{vol_data.get('volume_meaning', '')}*",
                             "",
                         ])
@@ -1004,8 +1009,13 @@ class NotificationService(
                     if chip_data:
                         chip_health = chip_data.get('chip_health', 'N/A')
                         chip_emoji = "✅" if chip_health == "健康" else ("⚠️" if chip_health == "一般" else "🚨")
+                        profit_ratio = chip_data.get('profit_ratio')
+                        avg_cost = chip_data.get('avg_cost')
+                        concentration = chip_data.get('concentration')
                         report_lines.extend([
-                            f"**筹码**: 获利比例 {chip_data.get('profit_ratio', 'N/A')} | 平均成本 {chip_data.get('avg_cost', 'N/A')} | 集中度 {chip_data.get('concentration', 'N/A')} {chip_emoji}{chip_health}",
+                            f"**筹码**: 获利比例 {profit_ratio if profit_ratio is not None else 'N/A'} | "
+                            f"平均成本 {avg_cost if avg_cost is not None else 'N/A'} | "
+                            f"集中度 {concentration if concentration is not None else 'N/A'} {chip_emoji}{chip_health}",
                             "",
                         ])
                 

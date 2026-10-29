@@ -544,7 +544,8 @@ class Config:
     news_max_age_days: int = 3   # 新闻最大时效（天）
     news_strategy_profile: str = "short"  # News window strategy: ultra_short/short/medium/long
     bias_threshold: float = 5.0  # 乖离率阈值（%），超过此值提示不追高
-    analysis_history_days: int = 60  # LLM 分析时发送的历史 K 线天数（默认 60 交易日）
+    analysis_history_days: int = 60
+    analysis_max_staleness_days: int = 7  # LLM 分析时发送的历史 K 线天数（默认 60 交易日）
 
     # === Agent 模式配置 ===
     agent_mode: bool = False
@@ -1208,6 +1209,10 @@ class Config:
             news_strategy_profile=normalize_news_strategy_profile(os.getenv('NEWS_STRATEGY_PROFILE', 'short')),
             bias_threshold=parse_env_float(os.getenv('BIAS_THRESHOLD'), 5.0, field_name='BIAS_THRESHOLD', minimum=1.0),
             analysis_history_days=parse_env_int(os.getenv('ANALYSIS_HISTORY_DAYS'), 60, field_name='ANALYSIS_HISTORY_DAYS', minimum=5),
+            analysis_max_staleness_days=parse_env_int(
+                os.getenv('ANALYSIS_MAX_STALENESS_DAYS'), 7,
+                field_name='ANALYSIS_MAX_STALENESS_DAYS', minimum=1,
+            ),
             agent_mode=os.getenv('AGENT_MODE', 'false').lower() == 'true',
             _agent_mode_explicit=os.getenv('AGENT_MODE') is not None,
             agent_litellm_model=(os.getenv('AGENT_LITELLM_MODEL') or "").strip(),

@@ -493,6 +493,10 @@ class StockAnalysisPipeline:
                 logger.debug("[%s] 基准状态获取失败: %s", code, exc)
             history_days = getattr(self.config, 'analysis_history_days', 60)
             context = self.db.get_analysis_context(code, target_date=analysis_date, history_days=history_days)
+            # 分析日期是“这次判断发生在哪一天”；context['date'] 是最后一根 K 线的日期。
+            # 两者必须分开，否则数据一过期，报告就会把旧 K 线日期写成分析日期。
+            if context is not None:
+                context['analysis_date'] = analysis_date.isoformat()
 
             if context is None:
                 logger.warning(f"{stock_name}({code}) 无法获取历史行情数据，将仅基于新闻和实时行情分析")
@@ -501,6 +505,7 @@ class StockAnalysisPipeline:
                     'code': code,
                     'stock_name': stock_name,
                     'date': market_today.isoformat(),
+                    'analysis_date': market_today.isoformat(),
                     'data_missing': True,
                     'today': {},
                     'yesterday': {}
@@ -524,6 +529,8 @@ class StockAnalysisPipeline:
             # Step 7.5: 填充分析时的价格信息到 result
             if result:
                 result.query_id = query_id
+                result.analysis_date = analysis_date.isoformat()
+                result.data_date = enhanced_context.get('date') or context.get('date')
                 realtime_data = enhanced_context.get('realtime', {})
                 result.current_price = realtime_data.get('price')
                 result.change_pct = realtime_data.get('change_pct')
@@ -554,7 +561,7 @@ class StockAnalysisPipeline:
             # Step 8: 保存分析历史记录
             if result:
                 try:
-                    self.db.save_analysis_history(
+                    saved = self.db.save_analysis_history(
                         result=result,
                         query_id=query_id,
                         report_type=report_type.value,
@@ -563,6 +570,14 @@ class StockAnalysisPipeline:
                         save_snapshot=self.save_context_snapshot,
                         strategy_id=None,
                     )
+                    if not saved:
+                        logger.error(
+                            "%s(%s) 分析结果未写入数据库：本次结果不会进入回测/学习",
+                            stock_name,
+                            code,
+                        )
+                        note = "本次分析结果未写入数据库，无法参与回测校准。"
+                        result.risk_warning = f"{result.risk_warning} {note}".strip()
                 except Exception as e:
                     logger.warning(f"{stock_name}({code}) 保存分析历史失败: {e}")
 
@@ -1284,6 +1299,51 @@ class StockAnalysisPipeline:
             filtered_codes.append(code)
         return filtered_codes
     
+    def _latest_bar_date(self, code: str):
+        db = getattr(self, "db", None)
+        if db is None or not hasattr(db, "get_latest_data"):
+            return None
+        rows = db.get_latest_data(code, 1)
+        return rows[0].date if rows else None
+
+    def _ensure_data_fresh(self, code: str) -> Tuple[bool, Any, Any]:
+        """Refresh once when the latest daily bar is too old.
+
+        Returns (fresh, latest_date, target_date). Stale data must never be used
+        to produce a trading call: a manual run in pre-market would otherwise
+        mix months-old technicals with today's realtime price.
+        """
+        market = get_market_for_stock(code)
+        target = get_market_today(market)
+        config = getattr(self, "config", None)
+        if config is None or getattr(self, "db", None) is None:
+            # Test doubles / partial pipelines: fail open, the LLM call still has
+            # its own data-missing warnings.
+            return True, None, target
+        max_gap = int(getattr(config, "analysis_max_staleness_days", 7))
+        latest = self._latest_bar_date(code)
+        if latest is not None and (target - latest).days <= max_gap:
+            return True, latest, target
+
+        logger.warning(
+            "[%s] 行情数据过期（最新 %s，目标 %s），尝试强制刷新",
+            code,
+            latest,
+            target,
+        )
+        self.fetch_and_save_stock_data(code, force_refresh=True)
+        latest = self._latest_bar_date(code)
+        fresh = latest is not None and (target - latest).days <= max_gap
+        if not fresh:
+            logger.error(
+                "[%s] 强制刷新后仍然过期（最新 %s，目标 %s，阈值 %s 天）",
+                code,
+                latest,
+                target,
+                max_gap,
+            )
+        return fresh, latest, target
+
     def process_single_stock(
         self,
         code: str,
@@ -1329,6 +1389,30 @@ class StockAnalysisPipeline:
             if not success:
                 logger.warning(f"[{code}] 数据获取失败: {error}")
                 # 即使获取失败，也尝试用已有数据分析
+
+            # 过期保护：数据落后超过阈值时不生成交易建议，避免用旧 K 线判断
+            fresh, latest_bar, target_date = self._ensure_data_fresh(code)
+            if not fresh:
+                max_gap = int(getattr(self.config, "analysis_max_staleness_days", 7))
+                message = (
+                    f"行情数据过期：最新 {latest_bar or '无'}，目标 {target_date}"
+                    f"（阈值 {max_gap} 天），已停止分析"
+                )
+                logger.error("[%s] %s", code, message)
+                display_name = STOCK_NAME_MAP.get(code) or code
+                return AnalysisResult(
+                    code=code,
+                    name=display_name,
+                    sentiment_score=50,
+                    trend_prediction="未知",
+                    operation_advice="观望",
+                    confidence_level="低",
+                    analysis_summary=message,
+                    risk_warning="行情数据过期，已停止分析；请检查数据源或网络后重试。",
+                    success=False,
+                    error_message=message,
+                    data_sources="stale-data-guard",
+                )
             
             # Step 2: AI 分析
             if skip_analysis:

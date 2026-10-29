@@ -494,5 +494,133 @@ A: 每次运行约 2-5 分钟，一个月 22 个工作日 = 44-110 分钟，远�
 
 ---
 
+## 公网服务器 + 域名 + 本机 PostgreSQL
+
+适合已经有公网 IP、域名和 PostgreSQL 的服务器。Docker 只跑应用，数据库留在宿主机。
+
+### 1. 架构约定
+
+```
+Internet → Caddy :443（自动 HTTPS）→ 127.0.0.1:8000（server 容器）
+                                     ↕
+                          宿主机 PostgreSQL :5432
+analyzer 容器：按计划执行分析（与 server 共用同一个库）
+```
+
+- `server` 只绑定 `127.0.0.1:8000`，不直接暴露公网；
+- `analyzer` 与 `server` 共用 `.env` 和数据库；
+- **不要同时保留 GitHub Actions 的定时任务**，否则同一批股票会被分析两次。
+
+### 2. 准备数据库
+
+```sql
+CREATE USER dsa WITH PASSWORD '换成强密码';
+CREATE DATABASE dsa OWNER dsa;
+```
+
+宿主机 `pg_hba.conf` 允许 Docker 网段连接（按实际网段调整）：
+
+```
+host    dsa    dsa    172.16.0.0/12    scram-sha-256
+```
+
+容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问宿主机；不要把 5432 暴露到公网。
+
+### 3. 配置 `.env`
+
+```dotenv
+# 服务器本机 PostgreSQL
+DATABASE_URL=postgresql+psycopg2://dsa:密码@host.docker.internal:5432/dsa
+
+STOCK_LIST=AAPL,MSFT,NVDA,0700
+
+LITELLM_MODEL=gemini/gemini-3-flash-preview
+GEMINI_API_KEY=...
+# TAVILY_API_KEYS=...
+# FINNHUB_API_KEY=...
+# ALPHAVANTAGE_API_KEY=...
+
+WEBUI_ENABLED=true
+WEBUI_HOST=0.0.0.0
+ADMIN_AUTH_ENABLED=true
+TZ=Asia/Shanghai
+```
+
+```bash
+chmod 600 .env
+```
+
+首次启动会自动 `create_all` 并执行兼容迁移（新增列），不需要手工建表。
+
+### 4. 启动
+
+```bash
+git clone <your-repo-url> /opt/stock-analysis
+cd /opt/stock-analysis
+cp .env.example .env && vim .env
+
+docker compose -f docker/docker-compose.server.yml up -d --build
+docker compose -f docker/docker-compose.server.yml ps
+docker compose -f docker/docker-compose.server.yml logs -f server
+```
+
+`docker/docker-compose.server.yml` 会同时启动 `server` 和 `analyzer`。
+
+### 5. 域名 + HTTPS（Caddy）
+
+```bash
+sudo apt install -y caddy
+sudo cp docker/Caddyfile.example /etc/caddy/Caddyfile
+sudo vim /etc/caddy/Caddyfile   # 把 stock.example.com 换成你的域名
+sudo systemctl reload caddy
+```
+
+DNS 添加 A/AAAA 记录指向服务器；Caddy 自动申请 Let's Encrypt 证书。示例配置默认屏蔽了 `/docs`、`/redoc`、`/openapi.json`。
+
+### 6. 防火墙
+
+```bash
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw deny 8000/tcp
+sudo ufw deny 5432/tcp
+sudo ufw enable
+```
+
+只开放 22/80/443。
+
+### 7. 首次登录
+
+打开 `https://你的域名`，首次会引导设置管理员密码。也可命令行重置：
+
+```bash
+docker compose -f docker/docker-compose.server.yml exec server python -m src.auth reset_password
+```
+
+### 8. 更新与备份
+
+```bash
+git pull
+docker compose -f docker/docker-compose.server.yml up -d --build
+```
+
+备份 `.env`、`data/`、`logs/` 和数据库：
+
+```bash
+pg_dump -U dsa -d dsa -Fc > /backup/dsa-$(date +%F).dump
+```
+
+### 9. 后续从 Supabase 迁移
+
+```bash
+pg_dump "$SUPABASE_URL" -Fc -f dsa-supabase.dump
+pg_restore -U dsa -d dsa --no-owner --no-privileges dsa-supabase.dump
+```
+
+当前 `analysis_history` / `backtest_results` / `backtest_summaries` 已清空，可只保留 `stock_daily`、`news_intel`、`llm_usage`、`portfolio_fx_rates` 等；迁移后启动应用会自动补列。
+
+---
+
 **祝部署顺利！🎉**
 

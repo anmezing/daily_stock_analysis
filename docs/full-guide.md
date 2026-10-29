@@ -815,6 +815,49 @@ python main.py --debug
 
 `lift > 0` 说明校准确实在提升准确率；`lift <= 0` 且配对样本数达到 `ANALYSIS_LEARNING_MIN_SAMPLES` 时，校准层会在下一次分析前自动暂停（不再改结论），等新样本证明有效后再恢复。这样"自动进化"是可被回测证伪的，而不是只靠感觉。
 
+### 成本、路径与基准
+
+每条回测记录同时保留：
+
+| 字段 | 含义 |
+|------|------|
+| `simulated_return_pct_gross` | 扣成本前的模拟收益 |
+| `simulated_return_pct` | 扣佣金/滑点后的净收益（胜率/均值都用它） |
+| `mfe_pct` / `mae_pct` | 窗口内最大浮盈 / 最大浮亏 |
+| `days_to_mfe` / `days_to_mae` | 第几天出现最大浮盈 / 浮亏 |
+| `benchmark_return_pct` | 同窗口基准收益 |
+| `excess_return_pct` | 个股收益 − 基准收益 |
+
+汇总额外输出 `avg_simulated_return_pct_gross`、`avg_mfe_pct`、`avg_mae_pct`、`avg_benchmark_return_pct`、`avg_excess_return_pct`、`excess_win_rate_pct`。
+
+> 成本按"买卖各扣一次"计算：`round_trip = 2 × (commission_bps + slippage_bps) / 100`（百分点）。默认 5bp 滑点，100 元标的往返约 0.1%。港股用户应把印花税/征费并入 `BACKTEST_COMMISSION_BPS`。
+
+### 多周期评估
+
+`BACKTEST_EXTRA_WINDOWS`（默认 `1,5,20`）会让同一批信号同时按 1/5/10/20 个交易日评估，每个窗口独立写入 `backtest_results`（唯一键已包含 `eval_window_days`），分别汇总。短窗口回答"方向对不对"，长窗口回答"逻辑能不能拿住"。
+
+### 组合层回测
+
+`POST /api/v1/backtest/portfolio` 会按信号日做横截面排序，只买分数最高的 N 只，限制最大持仓与持有天数，逐日盯市并输出：
+
+- 总收益 / 年化 / 最大回撤 / Sharpe / Sortino
+- 交易数、胜率、平均单笔收益、平均仓位暴露
+- 基准收益与超额收益
+- 每日权益曲线与逐笔成交
+
+> 组合回测的标的池仍是"系统分析过的股票"，不是全市场；横截面排序也只在当天已分析的信号里进行。
+
+### 数据质量护栏
+
+回测窗口内若出现单日收盘价 ±45% 以上的跳变（拆股/并股的典型特征），该条记录会写成 `eval_status=data_quality` 并跳过收益计算，不计入方向准确率、胜率、校准归因与学习集；候选查询会把 `data_quality` 视为终态，不会每次重试。Web 回测页会显示 `Data Quality` 计数。
+
+### 点时（PIT）纪律
+
+- 行情与上下文：`analysis_history.context_snapshot` 保存分析当时的完整输入，回测只读取 `analysis_date <= 信号日` 的日线；
+- 基本面：`fundamental_snapshot.created_at` + `query_id` 就是 as-of 时间，避免用后来重述的数据回填；
+- 新闻：保留 `published_date` 与抓取时间，提示词要求以条目日期为准；
+- 不要用新模型"重放"历史日期来做回测：模型的预训练知识可能包含分析日之后的事件，会造成前视。
+
 > 入场次日开盘若已跳空穿越止盈/止损，按开盘价成交（`gap_stop` / `gap_take_profit`），不会丢弃目标价继续持有到窗口结束。
 > `analysis_close` 模式用「信号日最终收盘价」入场：盘中生成的信号，收盘晚于决策时点，成交本身可实现；但止损/止盈是模型按分析时点价格给出的，若当日尾盘已越过目标，目标会被判定为失效并丢弃。默认 `next_open` 不受此影响。
 > 未完成记录（`insufficient_data` / `error`）会在后续运行中自动重试，不需要先执行 `force`。
@@ -843,10 +886,17 @@ python main.py --debug
 |------|-------|------|
 | `BACKTEST_ENABLED` | `true` | 是否在每日分析后自动运行回测 |
 | `BACKTEST_EVAL_WINDOW_DAYS` | `10` | 评估窗口（交易日数） |
+| `BACKTEST_EXTRA_WINDOWS` | `1,5,20` | 额外评估的窗口（逗号分隔）；留空表示只评估主窗口 |
 | `BACKTEST_MIN_AGE_DAYS` | `14` | 仅回测 N 天前的记录，避免数据不完整 |
 | `BACKTEST_ENGINE_VERSION` | `v1` | 引擎版本号，升级逻辑时用于区分结果 |
 | `BACKTEST_ENTRY_MODE` | `next_open` | 入场价口径：`next_open` / `analysis_close` / `next_close` |
 | `BACKTEST_NEUTRAL_BAND_PCT` | `2.0` | 中性区间阈值（%），±2% 内视为震荡 |
+| `BACKTEST_COMMISSION_BPS` | `0` | 佣金（bps），买卖各扣一次 |
+| `BACKTEST_SLIPPAGE_BPS` | `5` | 单边滑点（bps），买卖各扣一次；港股建议把税费并入佣金 |
+| `BACKTEST_BENCHMARK_ENABLED` | `true` | 是否抓取并对比基准指数 |
+| `BACKTEST_BENCHMARK_US` | `SPY` | 美股基准 |
+| `BACKTEST_BENCHMARK_HK` | `2800.HK` | 港股基准（盈富基金） |
+| `BACKTEST_BENCHMARK_CN` | `510300.SS` | A 股基准（沪深 300 ETF） |
 
 ### 自动运行
 
@@ -876,6 +926,26 @@ FastAPI 提供 RESTful API 服务，支持配置管理和触发分析。
 |------|------|
 | `python main.py --serve` | 启动 API 服务 + 执行一次完整分析 |
 | `python main.py --serve-only` | 仅启动 API 服务，手动触发分析 |
+
+### GitHub Actions 与 Web UI 的关系
+
+GitHub Actions 只负责**定时跑分析任务**（抓数据、调 LLM、写库、发通知），它不是常驻服务器，任务结束后没有可访问的 URL。
+
+Web UI 由 `main.py --serve-only` 启动的 FastAPI 进程提供：后端读取 `static/` 下的前端产物，并在启动时按 `WEBUI_AUTO_BUILD`（默认 `true`）自动执行 `npm ci && npm run build`。
+
+```bash
+# 本地/服务器：首次启动会自动构建前端（需要 Node/npm）
+python main.py --serve-only                 # http://127.0.0.1:8000
+python main.py --serve-only --host 0.0.0.0  # 局域网/手机访问
+
+# 或用 Docker（镜像内已完成前端构建）
+docker compose -f docker/docker-compose.yml up -d server
+```
+
+- UI 与 Actions 共用同一个 `DATABASE_URL`（例如 Supabase），所以在网页里能看到 Actions 刚生成的分析与回测；
+- 对公网开放前务必设置 `ADMIN_AUTH_ENABLED=true`，并在首次访问时设置密码（或 `python -m src.auth reset_password`）；
+- 关闭自动构建：`WEBUI_AUTO_BUILD=false`，然后手动 `cd apps/dsa-web && npm ci && npm run build`；
+- 桌面端（`apps/dsa-desktop`）自带本地服务与 UI，适合单机使用。
 
 ### 功能特性
 

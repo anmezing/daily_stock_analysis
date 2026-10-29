@@ -1,0 +1,25 @@
+# Example Caddyfile for exposing the Web UI with automatic HTTPS.
+#
+#   1. Point an A/AAAA record at the server.
+#   2. Replace stock.example.com with your domain.
+#   3. sudo cp docker/Caddyfile.example /etc/caddy/Caddyfile
+#   4. sudo systemctl reload caddy
+#
+# The container listens on 127.0.0.1:8000; Caddy terminates TLS.
+
+stock.example.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # The interactive API docs are public even when admin auth is enabled.
+    # Remove this block if you want Swagger UI on the public domain.
+    @api_docs path /docs* /redoc* /openapi.json
+    respond @api_docs 404
+}

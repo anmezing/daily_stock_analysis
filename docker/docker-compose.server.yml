@@ -1,0 +1,78 @@
+# Production server: Web UI/API only, bound to localhost behind Caddy.
+#
+#   docker compose -f docker/docker-compose.server.yml up -d --build
+#
+# Scheduled analysis is intentionally NOT started here. Keep it in GitHub
+# Actions, or add the `analyzer` service from docker-compose.yml and disable
+# the Actions schedule (do not run both).
+name: daily-stock-analysis
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: stock-server
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    command: ["python", "main.py", "--serve-only", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - TZ=Asia/Shanghai
+      - WEBUI_HOST=0.0.0.0
+      - WEBUI_ENABLED=true
+    # Reach a PostgreSQL running on the Docker host via host.docker.internal.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Only Caddy (on the host) can reach this port; never expose 8000 publicly.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../reports:/app/reports
+      - ../.env:/app/.env
+      - ../strategies:/app/strategies:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # Scheduled analysis (daily). Disable the GitHub Actions schedule when this
+  # runs, otherwise the same stocks are analyzed twice and LLM quota is wasted.
+  analyzer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: stock-analyzer
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../reports:/app/reports
+      - ../.env:/app/.env
+      - ../strategies:/app/strategies:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M

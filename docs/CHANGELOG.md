@@ -121,6 +121,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 回测新增**校准归因（双轨）**：同一条分析、同一段行情，同时评估校准前原始判断与校准后结论，输出 `raw_direction_accuracy_pct`、`calibration_lift_pct`、`calibration_sample_count`。`lift <= 0` 且配对样本足够时，校准层自动暂停，避免"越校准越差"。
 - [改进] 校准提升只在"校准器会改变方向结论"的样本上计算；暂停期间仍记录影子建议，避免未调整样本把 lift 稀释为 0、导致闸门永久锁死。
 - [改进] 校准暂停后仍持续记录"影子建议"并参与回测：如果影子建议重新跑赢原始判断，`lift > 0` 会自动恢复校准，不会一停到底。
+- [新功能] 回测加入**交易成本模型**：`BACKTEST_COMMISSION_BPS` / `BACKTEST_SLIPPAGE_BPS` 按买卖各扣一次，`simulated_return_pct` 改为净收益，同时保留 `simulated_return_pct_gross`；胜率与均值统一用净口径。
+- [新功能] 回测记录新增**路径指标** `mfe_pct` / `mae_pct` / `days_to_mfe` / `days_to_mae`，汇总输出平均最大浮盈/浮亏，用于判断"方向对但中途回撤多深"。
+- [新功能] 回测加入**基准对比**：自动抓取 `SPY` / `2800.HK` / `510300.SS` 并复用 `stock_daily` 缓存，记录 `benchmark_return_pct` 与 `excess_return_pct`；汇总输出平均基准收益、平均超额收益和跑赢基准比例，回答"到底是选股能力还是大盘 beta"。
+- [新功能] 分析提示词新增**市场状态块**：基准指数相对 200 日均线位置、20 日波动率、risk-on/risk-off 结论；risk-off 时明确要求买入更保守。基准状态只读缓存，不阻塞分析。
+- [新功能] 新增 **LLM 数值一致性校验**：对比输出里的现价/MA5/MA10/MA20 与输入数据，偏差 >1% 标记 `numeric_consistency=false`，并排除出回测与学习集；止损/目标价顺序不合理会记录 `target_order_invalid`。
+- [新功能] 回测支持**多周期**：`BACKTEST_EXTRA_WINDOWS=1,5,20` 会同时按多个窗口评估同一批信号，每个窗口独立入库与汇总；`run_backtest` 返回 `windows` 与 `per_window` 明细。
+- [新功能] 新增**组合层回测** `PortfolioBacktestService` 与 `POST /backtest/portfolio`：按信号日横截面排序、限制最大持仓与持有天数、逐日盯市，输出总收益/年化/最大回撤/Sharpe/Sortino/胜率/仓位暴露/基准超额与权益曲线。标的池为系统已分析过的股票。
+- [新功能] 数据质量护栏：回测窗口内单日收盘价跳变超过 ±45%（拆股/并股特征）时记为 `eval_status=data_quality`，不参与收益、准确率、校准归因与学习集，也不会被反复重试。
+- [改进] Web 回测页新增"Portfolio"卡片（日期/资金/持仓数/持有天数/最低分数、权益曲线）与校准提升、原始准确率、基准/超额、MFE/MAE 指标展示；顶栏显示 `Data Quality` 计数。
+- [修复] 修复 Web 前端构建：补齐 `motion` / `lucide-react` 依赖与缺失的 `ParticleBackground`、`AuthSettingsCard`、`SettingsSectionCard`、`SettingsCategoryNav` 组件；为旧页面补上 `ApiErrorAlert.onDismiss`、`Badge.style`、按钮别名变体、`ReportMarkdown.reportLanguage`、`AuthContext.setupState`、`useSystemConfig.refreshAfterExternalSave`；测试文件移出应用 `tsconfig`。`npm run lint` 与 `npm run build` 均通过。
+- [文档] 补充 GitHub Actions 与 Web UI 的关系：Actions 只跑定时任务，Web 页面需通过 `main.py --serve-only` 或 Docker 常驻运行，并说明本地/局域网/容器三种访问方式与认证要求。
 - [改进] 启发式校准增加样本外检查：用最近约 40% 的样本复算一次，要求方向优势在近期同样成立，否则不调整；日期不足 3 个交易日的场景无法切分，保持原行为。
 - [文档] 回测文档补充 `BACKTEST_ENTRY_MODE` 入场口径、缺口成交、自动重试与指标口径说明。
 - [新功能] 移植上游 Finnhub 美股数据源（`FINNHUB_API_KEY`），纳入美股 API 优先链：未配置 Key 时不注册，港股链路通过 `supports_code()` 自动跳过该源。

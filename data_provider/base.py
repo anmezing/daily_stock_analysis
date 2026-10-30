@@ -247,8 +247,13 @@ class RateLimitError(DataFetchError):
 
 
 class DataSourceUnavailableError(DataFetchError):
-    """数据源不可用异常"""
-    pass
+    """数据源不可用异常（未配置 Key、限流冷却、套餐不含该接口等）。
+
+    这类失败是可预期的：链路本该直接换下一个源，用 ERROR 级日志会让人误以为
+    程序出了故障，所以统一标记为 ``expected_skip``，由调用方降级记录。
+    """
+
+    expected_skip = True
 
 
 class BaseFetcher(ABC):
@@ -267,6 +272,17 @@ class BaseFetcher(ABC):
     
     name: str = "BaseFetcher"
     priority: int = 99  # 优先级数字越小越优先
+
+    def is_temporarily_unavailable(self) -> bool:
+        """数据源当前整体不可用（如限流冷却）。
+
+        返回 True 时链路组装阶段就会跳过它，避免每只股票都产生一条"跳过"日志。
+        """
+        return False
+
+    def is_daily_unavailable(self) -> bool:
+        """仅日线接口不可用（如 403 付费专属），实时行情仍可参与。"""
+        return self.is_temporarily_unavailable()
     
     @abstractmethod
     def _fetch_raw_data(self, stock_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -407,11 +423,16 @@ class BaseFetcher(ABC):
         except Exception as e:
             elapsed = time.time() - request_start
             error_type, error_reason = summarize_exception(e)
-            logger.error(
+            expected_skip = bool(getattr(e, "expected_skip", False))
+            log = logger.info if expected_skip else logger.error
+            log(
                 f"[{self.name}] {stock_code} 获取失败: 范围={start_date} ~ {end_date}, "
                 f"error_type={error_type}, elapsed={elapsed:.2f}s, reason={error_reason}"
             )
-            raise DataFetchError(f"[{self.name}] {stock_code}: {error_reason}") from e
+            wrapped = DataFetchError(f"[{self.name}] {stock_code}: {error_reason}")
+            # 保留"可预期跳过"标记，链路层据此降级日志，不把它当故障
+            wrapped.expected_skip = expected_skip
+            raise wrapped from e
     
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -975,7 +996,9 @@ class DataFetcherManager:
                 errors.append(f"[{fetcher.name}] {error_reason}")
             except Exception as e:
                 error_type, error_reason = summarize_exception(e)
-                logger.warning(
+                expected_skip = bool(getattr(e, "expected_skip", False))
+                logger.log(
+                    logging.DEBUG if expected_skip else logging.WARNING,
                     "[实时行情] %s %s 获取失败 (%s): %s: %s",
                     market_label,
                     stock_code,
@@ -1017,7 +1040,12 @@ class DataFetcherManager:
             chain.append(fetcher)
         return chain
 
-    def _get_us_hk_priority_chain(self, stock_code: str) -> List[BaseFetcher]:
+    def _get_us_hk_priority_chain(self, stock_code: str, *, daily: bool = True) -> List[BaseFetcher]:
+        """US/HK 优先链；``daily=True`` 时排除日线不可用的源。
+
+        限流冷却中（TwelveData）或被判定为付费专属（Finnhub candle）的源在这里
+        直接不进入链路，日志里也就不会出现"尝试 → 失败 → 切换"三连。
+        """
         normalized = normalize_stock_code(stock_code)
         if _market_tag(normalized) not in {"us", "hk"}:
             return []
@@ -1025,9 +1053,23 @@ class DataFetcherManager:
             fetcher
             for fetcher in self._get_us_hk_api_fetchers()
             if self._fetcher_supports_code(fetcher, normalized)
+            and not self._fetcher_unavailable(fetcher, daily=daily)
         ]
         yfinance_fetchers = self._named_fetchers("YfinanceFetcher")
         return self._dedupe_fetchers(api_fetchers + yfinance_fetchers)
+
+    @staticmethod
+    def _fetcher_unavailable(fetcher: BaseFetcher, *, daily: bool) -> bool:
+        method_name = "is_daily_unavailable" if daily else "is_temporarily_unavailable"
+        probe = getattr(fetcher, method_name, None)
+        if not callable(probe):
+            return False
+        try:
+            # 只认明确的 True：Mock/代理对象返回的假值不应把数据源踢出链路
+            return probe() is True
+        except Exception as exc:  # pragma: no cover - 防御性：健康探针不应影响主流程
+            logger.debug("[数据源链路] %s 可用性判断失败: %s", fetcher.name, exc)
+            return False
 
     @staticmethod
     def _prefer_realtime_source(fetchers: List[BaseFetcher], preferred_name: str) -> List[BaseFetcher]:
@@ -1136,15 +1178,27 @@ class DataFetcherManager:
                         return df, fetcher.name
                 except Exception as e:
                     error_type, error_reason = summarize_exception(e)
+                    expected_skip = bool(getattr(e, "expected_skip", False))
                     error_msg = f"[{fetcher.name}] ({error_type}) {error_reason}"
-                    logger.warning(
-                        f"[数据源失败 {attempt}/{total_market_fetchers}] [{fetcher.name}] {stock_code}: "
-                        f"error_type={error_type}, reason={error_reason}"
-                    )
+                    if expected_skip:
+                        logger.debug(
+                            "[数据源跳过 %s/%s] [%s] %s: %s",
+                            attempt,
+                            total_market_fetchers,
+                            fetcher.name,
+                            stock_code,
+                            error_reason,
+                        )
+                    else:
+                        logger.warning(
+                            f"[数据源失败 {attempt}/{total_market_fetchers}] [{fetcher.name}] {stock_code}: "
+                            f"error_type={error_type}, reason={error_reason}"
+                        )
                     errors.append(error_msg)
                     if attempt < total_market_fetchers:
                         next_fetcher = market_fetchers[attempt]
-                        logger.info(
+                        logger.log(
+                            logging.DEBUG if expected_skip else logging.INFO,
                             "[数据源切换] %s %s: [%s] -> [%s], reason=%s",
                             fast_path_label,
                             stock_code,
@@ -1335,7 +1389,7 @@ class DataFetcherManager:
         # 实时报价优先 Finnhub：其免费档提供美股实时行情，其余源在免费档多为延迟数据。
         if _is_us_code(stock_code):
             us_fetchers = self._prefer_realtime_source(
-                self._get_us_hk_priority_chain(stock_code), "FinnhubFetcher"
+                self._get_us_hk_priority_chain(stock_code, daily=False), "FinnhubFetcher"
             )
             return self._get_realtime_quote_from_fetcher_chain(
                 stock_code,
@@ -1346,7 +1400,7 @@ class DataFetcherManager:
 
         # 港股个股使用 API 优先链，Yfinance 永远最后兜底。
         if _is_hk_market(stock_code):
-            hk_fetchers = self._get_us_hk_priority_chain(stock_code)
+            hk_fetchers = self._get_us_hk_priority_chain(stock_code, daily=False)
             return self._get_realtime_quote_from_fetcher_chain(
                 stock_code,
                 hk_fetchers,
@@ -1605,31 +1659,20 @@ class DataFetcherManager:
             return static_name
 
         # 3. 依次尝试各个数据源
+        # 美股/港股跟随实时行情链路（Finnhub 优先），而不是另维护一份"TwelveData
+        # 开头"的表：TwelveData 免费档只有 8 credits/分钟，为 14 只股票各取一次名称
+        # 就会把额度耗掉，导致后面连行情都拿不到。
         fetchers = list(self._fetchers)
         market = _market_tag(stock_code)
-        if market == "us":
-            preferred_order = {
-                "TwelveDataFetcher": 0,
-                "LongbridgeFetcher": 1,
-                "YfinanceFetcher": 2,
-            }
-            fetchers = [
-                fetcher for fetcher in fetchers
-                if fetcher.name in preferred_order
-            ]
-            fetchers.sort(key=lambda fetcher: preferred_order.get(fetcher.name, 99))
-        elif market == "hk":
-            preferred_order = {
-                "TwelveDataFetcher": 0,
-                "LongbridgeFetcher": 1,
-                "YfinanceFetcher": 2,
-                "AkshareFetcher": 3,
-            }
-            fetchers = [
-                fetcher for fetcher in fetchers
-                if fetcher.name in preferred_order
-            ]
-            fetchers.sort(key=lambda fetcher: preferred_order.get(fetcher.name, 99))
+        if market in {"us", "hk"}:
+            fetchers = self._prefer_realtime_source(
+                self._get_us_hk_priority_chain(stock_code, daily=False),
+                "FinnhubFetcher",
+            )
+            if market == "hk":
+                fetchers = self._dedupe_fetchers(
+                    fetchers + self._named_fetchers("AkshareFetcher")
+                )
 
         for fetcher in fetchers:
             if hasattr(fetcher, 'get_stock_name'):

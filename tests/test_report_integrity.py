@@ -134,6 +134,49 @@ class TestCheckContentIntegrity(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("dashboard.battle_plan.sniper_points.stop_loss", missing)
 
+    def test_hold_does_not_require_entry_prices(self) -> None:
+        """持有/观望本来就没有建仓计划，不该强制要有 ideal_buy / secondary_buy。"""
+        result = AnalysisResult(
+            code="META",
+            name="Meta Platforms",
+            trend_prediction="强势空头",
+            sentiment_score=34,
+            operation_advice="持有",
+            analysis_summary="跌破均线，先观望",
+            decision_type="hold",
+            dashboard={
+                "core_conclusion": {"one_sentence": "空头排列，持有观望"},
+                "intelligence": {"risk_alerts": []},
+                "battle_plan": {"sniper_points": {"stop_loss": "580"}},
+            },
+        )
+
+        ok, missing = check_content_integrity(result)
+
+        self.assertTrue(ok, missing)
+
+    def test_buy_still_requires_secondary_buy(self) -> None:
+        """买入结论仍然必须给出两个不同的买点，避免模型只写一个价位。"""
+        result = AnalysisResult(
+            code="META",
+            name="Meta Platforms",
+            trend_prediction="看多",
+            sentiment_score=72,
+            operation_advice="买入",
+            analysis_summary="突破放量",
+            decision_type="buy",
+            dashboard={
+                "core_conclusion": {"one_sentence": "可分批买入"},
+                "intelligence": {"risk_alerts": []},
+                "battle_plan": {"sniper_points": {"stop_loss": "580", "ideal_buy": "620"}},
+            },
+        )
+
+        ok, missing = check_content_integrity(result)
+
+        self.assertFalse(ok)
+        self.assertIn("dashboard.battle_plan.sniper_points.secondary_buy", missing)
+
     def test_pass_when_stop_loss_missing_for_sell(self) -> None:
         """Integrity passes when stop_loss missing and decision_type is sell."""
         result = AnalysisResult(

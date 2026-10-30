@@ -909,7 +909,9 @@ class StockAnalysisPipeline:
             if result:
                 result.query_id = query_id
             # Agent weak integrity: placeholder fill only, no LLM retry
-            if result and getattr(self.config, "report_integrity_enabled", False):
+            # 只有拿到模型结论时才做完整性补全：失败结果本来就不入库，
+            # 再补一遍占位只会让日志出现"必填字段缺失"的假象。
+            if result and result.success and getattr(self.config, "report_integrity_enabled", False):
                 from src.analyzer import check_content_integrity, apply_placeholder_fill
 
                 pass_integrity, missing = check_content_integrity(result)

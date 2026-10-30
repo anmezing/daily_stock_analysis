@@ -517,12 +517,15 @@ def check_content_integrity(result: "AnalysisResult") -> Tuple[bool, List[str]]:
         stop_loss = sp.get("stop_loss")
         if stop_loss is None or (isinstance(stop_loss, str) and not stop_loss.strip()):
             missing.append("dashboard.battle_plan.sniper_points.stop_loss")
-        if ideal_buy is None or (isinstance(ideal_buy, str) and not ideal_buy.strip()):
-            missing.append("dashboard.battle_plan.sniper_points.ideal_buy")
-        if secondary_buy is None or (isinstance(secondary_buy, str) and not secondary_buy.strip()):
-            missing.append("dashboard.battle_plan.sniper_points.secondary_buy")
-        elif str(ideal_buy).strip() == str(secondary_buy).strip():
-            missing.append("dashboard.battle_plan.sniper_points.secondary_buy")
+        # 只有"买入类"结论才必须具备入场价位；持有/观望本来就没有建仓计划，
+        # 硬要求 ideal_buy/secondary_buy 只会让模型编一个数，或者被占位补成"待补充"。
+        if result.decision_type == "buy":
+            if ideal_buy is None or (isinstance(ideal_buy, str) and not ideal_buy.strip()):
+                missing.append("dashboard.battle_plan.sniper_points.ideal_buy")
+            if secondary_buy is None or (isinstance(secondary_buy, str) and not secondary_buy.strip()):
+                missing.append("dashboard.battle_plan.sniper_points.secondary_buy")
+            elif str(ideal_buy).strip() == str(secondary_buy).strip():
+                missing.append("dashboard.battle_plan.sniper_points.secondary_buy")
     return len(missing) == 0, missing
 
 

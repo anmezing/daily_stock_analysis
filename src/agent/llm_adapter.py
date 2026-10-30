@@ -33,6 +33,34 @@ from src.utils.json_sanitize import sanitize_non_finite
 
 logger = logging.getLogger(__name__)
 
+# 进程内记忆：Google 免费档的每日配额是"按模型 × 项目"算的，一旦打满，继续重试
+# 只会拖慢整轮分析（每只股票都要把这几个模型试一遍）。这里记住两类状态：
+# - 已被服务端下线的模型（404 / no longer available），后续直接跳过；
+# - 配额耗尽的冷却期，期间一律快速失败，交由上层记录"本轮失败"而不是产出占位分析。
+_DEAD_MODELS: set = set()
+_QUOTA_COOLDOWN_UNTIL: float = 0.0
+
+# 每日配额按天重置，冷却期取 30 分钟：足够让本轮剩余股票不再空转，
+# 又不会把第二天凌晨的定时任务挡在门外。
+QUOTA_COOLDOWN_SECONDS = 30 * 60
+
+_DEAD_MODEL_MARKERS = (
+    "no longer available",
+    "model not found",
+    "does not exist",
+    "not_found",
+)
+_QUOTA_MARKERS = (
+    # 只匹配"每日配额打满"，不要匹配每分钟限流（后者等几十秒就好）
+    "free_tier",
+    "freetier",
+    "exceeded your current quota",
+    "resource_exhausted",
+    "per day",
+    "daily limit",
+    "billing details",
+)
+
 
 # ============================================================
 # Unified response types
@@ -135,6 +163,31 @@ def _short_error(exc: BaseException, limit: int = 240) -> str:
     lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
     first = lines[0] if lines else type(exc).__name__
     return first if len(first) <= limit else first[:limit] + "..."
+
+
+def _is_dead_model_error(exc: BaseException) -> bool:
+    """模型被服务端下线/改名时，继续重试没有意义。"""
+    text = str(exc).lower()
+    if "notfound" not in type(exc).__name__.lower() and "not found" not in text:
+        return False
+    return any(marker in text for marker in _DEAD_MODEL_MARKERS) or "model" in text
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    """免费档每日配额打满（429 + RESOURCE_EXHAUSTED）。"""
+    text = str(exc).lower()
+    return any(marker in text for marker in _QUOTA_MARKERS)
+
+
+def _remaining_quota_cooldown() -> float:
+    return max(0.0, _QUOTA_COOLDOWN_UNTIL - time.time())
+
+
+def reset_model_health_cache() -> None:
+    """测试/长驻进程手动重置模型健康状态。"""
+    _DEAD_MODELS.clear()
+    global _QUOTA_COOLDOWN_UNTIL
+    _QUOTA_COOLDOWN_UNTIL = 0.0
 
 
 def get_thinking_extra_body(model: str) -> Optional[dict]:
@@ -409,14 +462,35 @@ class LLMToolAdapter:
         timeout: Optional[float] = None,
     ) -> LLMResponse:
         """Shared completion path for both tool and text-only calls."""
+        global _QUOTA_COOLDOWN_UNTIL
+
         self._maybe_reinit_router()  # Issue #152: hot-reload Router on config change
         config = self._config
-        models_to_try = get_effective_agent_models_to_try(config)
+        models_to_try = [
+            model
+            for model in get_effective_agent_models_to_try(config)
+            if model not in _DEAD_MODELS
+        ]
+        if not models_to_try:
+            error_msg = "All configured LLM models are unavailable (removed by the provider or disabled)"
+            logger.error(error_msg)
+            return LLMResponse(content=error_msg, provider="error")
+
+        cooldown_left = _remaining_quota_cooldown()
+        if cooldown_left > 0:
+            error_msg = (
+                f"LLM quota exhausted; skipping calls for another {int(cooldown_left)}s "
+                "to avoid burning the rest of the run"
+            )
+            logger.error(error_msg)
+            return LLMResponse(content=error_msg, provider="error")
+
         started_at = time.time()
         providers = [self._get_model_provider(m) for m in models_to_try]
 
         last_error = None
         hit_rate_limit = False
+        hit_quota_limit = False
         for idx, model in enumerate(models_to_try):
             remaining_timeout = timeout
             if timeout is not None and timeout > 0:
@@ -436,11 +510,20 @@ class LLMToolAdapter:
                     timeout=remaining_timeout,
                 )
             except Exception as e:
-                if self._is_context_window_error(e):
+                if _is_dead_model_error(e):
+                    _DEAD_MODELS.add(model)
+                    logger.warning(
+                        "Agent LLM model %s is no longer available, disabled for this process: %s",
+                        model,
+                        _short_error(e),
+                    )
+                elif self._is_context_window_error(e):
                     logger.warning("Agent LLM context window exceeded on %s: %s", model, e)
                 elif self._is_rate_limit_error(e):
-                    logger.warning("Agent LLM rate-limited on %s: %s", model, e)
+                    logger.warning("Agent LLM rate-limited on %s: %s", model, _short_error(e))
                     hit_rate_limit = True
+                    if _is_quota_error(e):
+                        hit_quota_limit = True
                     # Avoid blind backoff across different providers; cross-provider
                     # fallback usually means different accounts/rate-limit buckets.
                     should_backoff = (
@@ -460,6 +543,14 @@ class LLMToolAdapter:
                     logger.debug("Agent LLM call traceback for %s", model, exc_info=True)
                 last_error = e
                 continue
+
+        if hit_quota_limit:
+            _QUOTA_COOLDOWN_UNTIL = time.time() + QUOTA_COOLDOWN_SECONDS
+            logger.error(
+                "LLM free-tier quota is exhausted; pausing all LLM calls for %ss. "
+                "Remaining stocks will be reported as failed instead of placeholder analyses.",
+                QUOTA_COOLDOWN_SECONDS,
+            )
 
         suffix = " (rate-limit encountered during fallback)" if hit_rate_limit else ""
         error_msg = f"All LLM models failed{suffix}. Last error: {_short_error(last_error) if last_error else 'unknown'}"

@@ -98,7 +98,6 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
     report = service.format_intel_report(
         intel_results,
         stock_name,
-        stock_code=stock_code,
     )
     market_summary = service.build_market_intel_summary(
         stock_code,

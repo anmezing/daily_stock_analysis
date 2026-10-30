@@ -196,6 +196,10 @@ class StockAnalysisPipeline:
         """Apply history-driven calibration without breaking the main pipeline."""
         if result is None:
             return None
+        # 没拿到模型结论时不要做校准：这时的信号是占位值（观望/50），
+        # 校准它只会产出一条假的"校准建议"，也会污染影子对照样本。
+        if not getattr(result, "success", True):
+            return result
 
         try:
             calibrated = self.calibration_service.calibrate_result(result, context_snapshot=context_snapshot)
@@ -559,7 +563,16 @@ class StockAnalysisPipeline:
             )
 
             # Step 8: 保存分析历史记录
-            if result:
+            # 与 Agent 链保持一致：LLM 失败时 result 只是占位默认值
+            # （50 / 持有 / 成功后无 model_used），不该进 Web 历史与回测样本。
+            if result and not result.success:
+                logger.error(
+                    "%s(%s) 分析未成功（%s），本轮不写入分析历史",
+                    stock_name,
+                    code,
+                    result.error_message or "未知原因",
+                )
+            if result and result.success:
                 try:
                     saved = self.db.save_analysis_history(
                         result=result,
@@ -948,7 +961,15 @@ class StockAnalysisPipeline:
                     logger.warning(f"[{code}] Agent 模式保存新闻情报失败: {e}")
 
             # 保存分析历史记录
-            if result:
+            # 只有真正拿到模型结论才入库：LLM 全部失败时 result 仍是占位默认值
+            # （评分 50 / 观望 / 未知），入库后会污染 Web 历史与回测样本。
+            if result and not result.success:
+                logger.error(
+                    "[%s] Agent 未产出有效结论（%s），本轮不写入分析历史",
+                    code,
+                    result.error_message or "未知原因",
+                )
+            if result and result.success:
                 try:
                     initial_context["stock_name"] = resolved_stock_name
                     self.db.save_analysis_history(

@@ -740,6 +740,27 @@ def _build_schedule_time_provider(default_schedule_time: str):
     return _provider
 
 
+def _notify_schedule_failure(config: Config, exc: BaseException) -> None:
+    """定时任务整体失败时推送一条告警；告警失败不影响主流程。"""
+    try:
+        from src.notification import NotificationService
+
+        notifier = NotificationService()
+        if not notifier.is_available():
+            logger.warning("定时任务失败，但没有可用的通知渠道，跳过告警推送")
+            return
+        message = (
+            "⚠️ 定时分析执行失败\n"
+            f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"原因: {str(exc)[:500]}\n"
+            "排查: docker compose logs --tail=100 analyzer"
+        )
+        if not notifier.send(message):
+            logger.warning("定时任务失败告警发送失败")
+    except Exception as notify_exc:
+        logger.warning("发送定时任务失败告警时出错: %s", notify_exc)
+
+
 def _resolve_web_server_mode(config: Config, args: argparse.Namespace) -> Tuple[bool, str]:
     """决定是否启动 Web 服务。
 
@@ -986,7 +1007,12 @@ def main() -> int:
 
             def scheduled_task():
                 runtime_config = _reload_runtime_config()
-                run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                try:
+                    run_full_analysis(runtime_config, args, scheduled_stock_codes)
+                except Exception as exc:
+                    logger.exception("定时分析执行失败: %s", exc)
+                    _notify_schedule_failure(runtime_config, exc)
+                    raise
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):

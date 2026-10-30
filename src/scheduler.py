@@ -13,15 +13,72 @@
 - schedule: 轻量级定时任务库
 """
 
+import json
 import logging
+import os
 import re
 import signal
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# 补跑窗口：容器在计划时间之后重启时，只要还在窗口内就补跑一次，
+# 避免"重启一次就整天没分析"。
+CATCH_UP_WINDOW_HOURS = 6
+# 记录最近一次成功执行的日期（本地时区），用于判断是否需要补跑
+SCHEDULE_STATE_PATH = os.getenv("SCHEDULE_STATE_PATH") or os.path.join("data", ".schedule_state.json")
+
+
+def _state_file_path() -> Path:
+    return Path(SCHEDULE_STATE_PATH)
+
+
+def load_last_run_date() -> Optional[str]:
+    """读取上次成功执行的日期（ISO 格式）；文件损坏/不存在时返回 None。"""
+    try:
+        raw = _state_file_path().read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        value = str(payload.get("last_run_date") or "").strip()
+        return value or None
+    except Exception:
+        return None
+
+
+def mark_run_completed(run_date: Optional[str] = None) -> None:
+    """记录一次成功执行；失败不影响主流程。"""
+    target = run_date or datetime.now().date().isoformat()
+    try:
+        path = _state_file_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"last_run_date": target, "updated_at": datetime.now().isoformat()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # pragma: no cover - 磁盘异常不阻断分析
+        logger.warning("[Scheduler] 记录执行状态失败: %s", exc)
+
+
+def should_catch_up(
+    now: datetime,
+    schedule_time: str,
+    last_run_date: Optional[str],
+    window_hours: int = CATCH_UP_WINDOW_HOURS,
+) -> bool:
+    """判断启动时是否需要补跑当天错过的那一轮。"""
+    if last_run_date == now.date().isoformat():
+        return False
+    match = re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", (schedule_time or "").strip())
+    if not match:
+        return False
+    hour, minute = (int(part) for part in schedule_time.strip().split(":"))
+    scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now < scheduled:
+        return False
+    return now - scheduled <= timedelta(hours=window_hours)
 
 
 class GracefulShutdown:
@@ -246,7 +303,24 @@ def run_with_schedule(
         schedule_time=schedule_time,
         schedule_time_provider=schedule_time_provider,
     )
-    scheduler.set_daily_task(task, run_immediately=run_immediately)
+
+    def _task_with_state() -> None:
+        """执行分析并在成功后记录日期，供补跑判断使用。"""
+        task()
+        mark_run_completed()
+
+    catch_up = False
+    if not run_immediately:
+        last_run = load_last_run_date()
+        catch_up = should_catch_up(datetime.now(), schedule_time, last_run)
+        if catch_up:
+            logger.warning(
+                "[Scheduler] 检测到今天 %s 的计划任务尚未执行（上次成功: %s），立即补跑一次",
+                schedule_time,
+                last_run or "无记录",
+            )
+
+    scheduler.set_daily_task(_task_with_state, run_immediately=run_immediately or catch_up)
 
     # 注册后台周期任务
     for bg in (background_tasks or []):

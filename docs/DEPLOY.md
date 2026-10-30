@@ -682,6 +682,47 @@ docker compose -f docker/docker-compose.server.yml run --rm -T \
 - 不要给这类一次性命令加 `| tail -40`，管道会等到进程结束才显示，看起来像卡住。
 - 容器以 root 写 `reports/`，宿主机普通用户删不掉，清理测试产物时用 `sudo rm -f reports/*.md`。
 
+#### 确认定时任务会自动执行
+
+`analyzer` 容器的 CMD 是 `python main.py --schedule`，`restart: unless-stopped`，只要容器在跑就会按 `SCHEDULE_TIME`（`TZ=America/New_York`）触发。
+
+启动后应当看到这两行：
+
+```
+INFO | src/scheduler.py | 已设置每日定时任务，执行时间: 10:00
+INFO | src/scheduler.py | 调度器开始运行... 下次执行时间: 2026-10-30 10:00:00
+```
+
+三层保障：
+
+1. **正常运行**：到点自动执行，日志出现 `定时任务开始执行 - <时间>`，结束后写入 `analysis_history` 与 `reports/`。
+2. **重启补跑**：容器在 10:00 之后重启时，只要距计划时间不超过 6 小时且当天还没成功跑过，启动会立即补跑一次，日志为
+   `[Scheduler] 检测到今天 10:00 的计划任务尚未执行（上次成功: ...），立即补跑一次`。
+   执行状态记录在 `data/.schedule_state.json`。
+3. **失败告警**：整轮任务抛异常时会通过已配置的通知渠道推送一条 `⚠️ 定时分析执行失败`（含原因与排查命令）。
+
+每天怎么核对有没有跑：
+
+```bash
+# 看今天有没有产生分析记录（把日期换成美东当天）
+docker compose -f docker/docker-compose.db.yml exec -T db psql -U dsa -d dsa -c "
+select code, analysis_date, data_date, sentiment_score, operation_advice
+from analysis_history
+where analysis_date = current_date
+order by id desc limit 20;"
+
+# 看调度器心跳（每小时整点会打一条）
+docker compose -f docker/docker-compose.server.yml logs --tail=200 analyzer | grep -E "调度器运行中|定时任务开始执行"
+```
+
+如果当天该跑没跑，先确认容器状态，再手动补一次：
+
+```bash
+docker compose -f docker/docker-compose.server.yml ps
+docker compose -f docker/docker-compose.server.yml run --rm -T \
+  analyzer python main.py --no-notify
+```
+
 ### 5. 域名 + HTTPS（Caddy）
 
 ```bash

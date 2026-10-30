@@ -164,6 +164,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] LLM 路由记住模型健康状态：404 / `no longer available` 的模型在本进程内直接跳过；免费档每日配额打满后暂停 30 分钟内的所有 LLM 调用并快速失败，不再对剩余股票逐个重试三个模型。
 - [改进] 单个模型日配额打满时只把该模型移出候选（30 分钟），同一次调用继续尝试配额独立的 fallback，不再整轮停摆。
 - [改进] 默认模型改为按免费档 RPD 选型：Gemini 3 Flash / 3.8 Flash 免费档仅 20 次/天，`*-flash-lite`（3.1/3.5）为 500 次/天；`GEMINI_MODEL_FALLBACK` 默认值与服务器模板改用 `gemini-3.5-flash-lite`，模板主模型同步调整并注明质量/配额取舍。
+- [新功能] 定时任务补跑：`analyzer` 容器在计划时间之后才启动（重启/重新部署）时，若当天尚未成功执行且距计划时间 ≤6 小时，启动后立即补跑一次；执行状态记录在 `data/.schedule_state.json`，日志会说明补跑原因。
+- [新功能] 定时任务整体失败时通过已配置的通知渠道推送 `⚠️ 定时分析执行失败`（含原因与排查命令），不再只有日志。
+- [文档] `DEPLOY.md` 新增"确认定时任务会自动执行"：启动应有的两行日志、补跑规则、每日核对 SQL 与手动补跑命令。
 - [改进] 日志统一脱敏：`RelativePathFormatter` 在输出前把 DSN 密码、URL/表单里的 `apikey`/`token`/`password` 等参数、`Authorization` 头、Telegram `bot<token>` URL 以及 `AIza`/`sk-`/`xox*`/`ghp_`/`AKIA` 前缀的 Key 替换成 `***`，第三方库与 traceback 一并覆盖；`数据库初始化完成` 也不再打印明文数据库密码。
 - [改进] `AGENT_SKILLS` 陷阱提示：填写具体策略会自动启用 Agent 链（即使 `AGENT_MODE=false`），现在配置校验会在启动时明确提示；`.env.example` 与服务器模板补充了 Agent 单/多架构的调用量对比、策略清单与"标准链需清空 AGENT_SKILLS"的说明。
 - [改进] 启动日志不再为"没配置的可选数据源"报警：Tushare（仅 A 股）未配置 Token、IBKR 未装 `ib_insync` 只记 DEBUG；`Config.validate()` 也只在自选股/复盘范围确实包含 A 股时才提示 Tushare。"已初始化 N 个数据源"不再把 Efinance/Tushare/Pytdx 等 A 股源列在 INFO 里（完整优先级列表移到 DEBUG）。

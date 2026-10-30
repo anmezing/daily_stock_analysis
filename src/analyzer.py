@@ -38,6 +38,7 @@ from src.core.trading_calendar import get_market_for_stock
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
 from src.schemas.report_schema import AnalysisReportSchema
+from src.utils.json_sanitize import sanitize_non_finite
 
 logger = logging.getLogger(__name__)
 
@@ -1478,7 +1479,13 @@ class GeminiAnalyzer:
         router_model_names: set,
     ) -> Any:
         """Dispatch a LiteLLM completion through router or direct fallback."""
-        effective_kwargs = dict(call_kwargs)
+        effective_kwargs, replaced_paths = sanitize_non_finite(dict(call_kwargs))
+        if replaced_paths:
+            logger.warning(
+                "LLM 请求体包含 %d 处非法数值（nan/inf），已替换为 null：%s",
+                len(replaced_paths),
+                ", ".join(replaced_paths[:10]),
+            )
         get_llm_rate_limiter().acquire(
             bucket=get_rate_limit_bucket(model),
             min_interval_seconds=getattr(config, "llm_min_interval", 0.0),

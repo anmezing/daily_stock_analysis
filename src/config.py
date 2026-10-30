@@ -12,6 +12,7 @@ A股自选股智能分析系统 - 配置管理模块
 
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -135,6 +136,14 @@ def parse_env_float(
             field_name, parsed, maximum, maximum,
         )
         parsed = maximum
+    # float('nan') / float('inf') 也是合法输入，但会被原样写进 LLM 请求体，
+    # 导致 httpx 序列化时报 "Out of range float values are not JSON compliant"。
+    if not math.isfinite(parsed):
+        logger.warning(
+            "%s=%r is not a finite number; falling back to %s",
+            field_name, raw_value, default,
+        )
+        parsed = float(default)
     return parsed
 
 
@@ -318,12 +327,20 @@ def get_configured_llm_models(model_list: List[Dict[str, Any]]) -> List[str]:
 
 def resolve_unified_llm_temperature(model: str) -> float:
     """Resolve the unified LLM temperature with backward-compatible fallbacks."""
-    llm_temperature_raw = os.getenv("LLM_TEMPERATURE")
-    if llm_temperature_raw and llm_temperature_raw.strip():
+
+    def _finite(raw: Optional[str]) -> Optional[float]:
+        """``float('nan')``/``float('inf')`` 不报错但会让请求体无法序列化。"""
+        if not raw or not str(raw).strip():
+            return None
         try:
-            return float(llm_temperature_raw)
+            parsed = float(str(raw).strip())
         except (ValueError, TypeError):
-            pass
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    llm_temperature = _finite(os.getenv("LLM_TEMPERATURE"))
+    if llm_temperature is not None:
+        return llm_temperature
 
     provider_temperature_env = {
         "gemini": "GEMINI_TEMPERATURE",
@@ -334,20 +351,14 @@ def resolve_unified_llm_temperature(model: str) -> float:
     }
     preferred_env = provider_temperature_env.get(_get_litellm_provider(model))
     if preferred_env:
-        preferred_value = os.getenv(preferred_env)
-        if preferred_value and preferred_value.strip():
-            try:
-                return float(preferred_value)
-            except (ValueError, TypeError):
-                pass
+        preferred_value = _finite(os.getenv(preferred_env))
+        if preferred_value is not None:
+            return preferred_value
 
     for env_name in ("GEMINI_TEMPERATURE", "ANTHROPIC_TEMPERATURE", "OPENAI_TEMPERATURE"):
-        env_value = os.getenv(env_name)
-        if env_value and env_value.strip():
-            try:
-                return float(env_value)
-            except (ValueError, TypeError):
-                continue
+        env_value = _finite(os.getenv(env_name))
+        if env_value is not None:
+            return env_value
 
     # 分析结论要被回测和学习复用，温度过高会让同一份技术面在不同日期
     # 得到方向相反的结果，测出来的准确率只是在测采样噪声。

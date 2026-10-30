@@ -29,6 +29,7 @@ from src.config import (
     get_effective_agent_primary_model,
 )
 from src.core.llm_rate_limiter import get_llm_rate_limiter, get_rate_limit_bucket
+from src.utils.json_sanitize import sanitize_non_finite
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +500,17 @@ class LLMToolAdapter:
 
         if tools:
             call_kwargs["tools"] = tools
+
+        # messages / tools 里只要有一个 nan/inf，httpx 在发请求前就会抛
+        # "Out of range float values are not JSON compliant"，被 LiteLLM 包成
+        # APIConnectionError，看起来像网络错误。发送前统一清洗。
+        call_kwargs, replaced_paths = sanitize_non_finite(call_kwargs)
+        if replaced_paths:
+            logger.warning(
+                "LLM 请求体包含 %d 处非法数值（nan/inf），已替换为 null：%s",
+                len(replaced_paths),
+                ", ".join(replaced_paths[:10]),
+            )
 
         get_llm_rate_limiter().acquire(
             bucket=get_rate_limit_bucket(model, default=self._get_model_provider(model)),

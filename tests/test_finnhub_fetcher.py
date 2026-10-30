@@ -146,6 +146,91 @@ class TestFinnhubFetcherFetchRaw(unittest.TestCase):
             self.fetcher._fetch_raw_data('AAPL', '2024-06-10', '2024-06-11')
 
 
+class TestFinnhubMultiKey(unittest.TestCase):
+    """多 Key 轮询：429 只冷却当前 Key，换下一个继续。"""
+
+    def _fetcher(self, *keys):
+        from unittest.mock import MagicMock, patch as _patch
+
+        from data_provider.finnhub_fetcher import FinnhubFetcher
+
+        with _patch('src.config.get_config') as mock_config:
+            mock_config.return_value = MagicMock(
+                finnhub_api_keys=list(keys),
+                finnhub_api_key=keys[0] if keys else None,
+            )
+            fetcher = FinnhubFetcher()
+        fetcher._api_keys = list(keys)
+        fetcher._key_index = 0
+        fetcher._key_cooldown = {}
+        fetcher._dead_keys = set()
+        return fetcher
+
+    @patch('data_provider.finnhub_fetcher.requests.get')
+    def test_second_key_takes_over_after_429(self, mock_get):
+        fetcher = self._fetcher('key-aaaa1111', 'key-bbbb2222')
+        mock_get.side_effect = [
+            _make_mock_response({}, status_code=429),
+            _make_mock_response({'c': 250.0}),
+        ]
+
+        data = fetcher._request_json('quote', {'symbol': 'AAPL'})
+
+        self.assertEqual(data, {'c': 250.0})
+        sent = [call.kwargs['params']['token'] for call in mock_get.call_args_list]
+        self.assertEqual(sent, ['key-aaaa1111', 'key-bbbb2222'])
+        self.assertGreater(fetcher._key_cooldown['key-aaaa1111'], 0)
+        # 只有一个 Key 冷却，整体仍可用
+        self.assertFalse(fetcher.is_temporarily_unavailable())
+
+    @patch('data_provider.finnhub_fetcher.requests.get')
+    def test_all_keys_throttled_marks_source_unavailable(self, mock_get):
+        from data_provider.base import DataSourceUnavailableError
+
+        fetcher = self._fetcher('key-aaaa1111', 'key-bbbb2222')
+        mock_get.return_value = _make_mock_response({}, status_code=429)
+
+        with self.assertRaises(DataSourceUnavailableError):
+            fetcher._request_json('quote', {'symbol': 'AAPL'})
+
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertTrue(fetcher.is_temporarily_unavailable())
+
+    @patch('data_provider.finnhub_fetcher.requests.get')
+    def test_keys_rotate_between_requests(self, mock_get):
+        fetcher = self._fetcher('key-aaaa1111', 'key-bbbb2222')
+        mock_get.return_value = _make_mock_response({'c': 250.0})
+
+        for _ in range(4):
+            fetcher._request_json('quote', {'symbol': 'AAPL'})
+
+        sent = [call.kwargs['params']['token'] for call in mock_get.call_args_list]
+        self.assertEqual(
+            sent,
+            ['key-aaaa1111', 'key-bbbb2222', 'key-aaaa1111', 'key-bbbb2222'],
+        )
+
+    @patch('data_provider.finnhub_fetcher.requests.get')
+    def test_invalid_key_is_disabled(self, mock_get):
+        fetcher = self._fetcher('key-bad00000', 'key-good2222')
+        mock_get.side_effect = [
+            _make_mock_response({}, status_code=401),
+            _make_mock_response({'c': 250.0}),
+        ]
+
+        data = fetcher._request_json('quote', {'symbol': 'AAPL'})
+
+        self.assertEqual(data, {'c': 250.0})
+        self.assertIn('key-bad00000', fetcher._dead_keys)
+
+    def test_masked_key_never_leaks_the_value(self):
+        fetcher = self._fetcher('abcdef0123456789')
+
+        masked = fetcher._mask_key('abcdef0123456789')
+
+        self.assertEqual(masked, '***6789')
+
+
 class TestFinnhubFetcherRealtimeQuote(unittest.TestCase):
     """校验实时行情字段映射。"""
 

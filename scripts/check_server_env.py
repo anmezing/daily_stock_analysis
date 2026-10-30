@@ -708,7 +708,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     check_template_coverage(values, active_template_keys, report)
 
     # 不打印任何值，只打印“有没有填”
-    for key in ("DATABASE_URL", "POSTGRES_PASSWORD", "GEMINI_API_KEY", "GEMINI_API_KEYS", "FINNHUB_API_KEY", "TWELVEDATA_API_KEY", "TAVILY_API_KEYS"):
+    for key in (
+        "DATABASE_URL",
+        "POSTGRES_PASSWORD",
+        "GEMINI_API_KEY",
+        "GEMINI_API_KEYS",
+        "FINNHUB_API_KEY",
+        "FINNHUB_API_KEYS",
+        "TWELVEDATA_API_KEY",
+        "TWELVEDATA_API_KEYS",
+        "TAVILY_API_KEYS",
+    ):
         if key in values:
             print(f"  {key} = {describe(values[key])}")
     print()

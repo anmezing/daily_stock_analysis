@@ -2361,6 +2361,11 @@ class SearchService:
     def _resolve_finnhub_keys(finnhub_keys: Optional[List[str]]) -> List[str]:
         if finnhub_keys is not None:
             return [key.strip() for key in finnhub_keys if key and key.strip()]
+        # 新闻源沿用与行情一致的多 Key 配置：FINNHUB_API_KEYS 优先
+        raw_plural = (os.getenv("FINNHUB_API_KEYS") or "").strip()
+        keys = [key.strip() for key in raw_plural.split(",") if key.strip()]
+        if keys:
+            return list(dict.fromkeys(keys))
         raw = (os.getenv("FINNHUB_API_KEY") or "").strip()
         return [raw] if raw else []
 

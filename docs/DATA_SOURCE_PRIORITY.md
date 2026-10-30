@@ -207,6 +207,38 @@
 
 ---
 
+## 股票名称解析
+
+美股/港股的名称解析**沿用实时行情链路顺序**（美股 Finnhub 优先），不再单独维护
+"TwelveData 开头"的表：
+
+```
+美股：FinnhubFetcher(/search) -> TwelveData -> Longbridge -> Yfinance
+港股：TwelveData -> Longbridge -> Yfinance -> Akshare（最后兜底）
+```
+
+原因：TwelveData 免费档只有 8 credits/分钟，若每只股票都用它取一次名称，
+14 只股票就会耗掉一大半额度，后面的日线/实时行情只能降级到其他源。
+
+同一进程内名称会缓存（`_stock_name_cache`），同一只股票只查一次；链路中当前
+不可用的源（限流冷却、日线被判付费专属）会在组装链路时直接跳过。
+
+### 多账号 / 多 Key
+
+| 数据源 | 多 Key | 配置 |
+|---|---|---|
+| Twelve Data | ✅ 轮询 | `TWELVEDATA_API_KEYS=key1,key2`（单数 `TWELVEDATA_API_KEY` 仍兼容） |
+| Finnhub | ✅ 轮询 | `FINNHUB_API_KEYS=key1,key2`（单数 `FINNHUB_API_KEY` 仍兼容；行情与公司新闻共用） |
+| AlphaVantage | ❌ 单 Key | `ALPHAVANTAGE_API_KEY=`（免费档 25 calls/day） |
+| Gemini（LLM） | ✅ 轮询 | `GEMINI_API_KEYS=key1,key2`（需属于不同 Google Cloud 项目才叠加额度） |
+| Tavily / Brave / SerpAPI | ✅ 轮询 | `TAVILY_API_KEYS=` / `BRAVE_API_KEYS=` / `SERPAPI_API_KEYS=` |
+
+Twelve Data 的 429 是**账号级**的：命中后只冷却当前 Key（默认 60s），其余 Key
+继续服务；所有 Key 都在冷却时该源才会整体退出链路。Finnhub 的行为相同
+（429 只冷却当前 Key，401 直接停用该 Key，日志只显示 Key 末 4 位）。
+
+---
+
 ## 字段补充机制
 
 当第一个成功的数据源返回的数据中某些字段为空时，系统会尝试从后续数据源补充这些字段。

@@ -24,19 +24,29 @@ from tenacity import (
     wait_exponential,
 )
 
-from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, normalize_stock_code
+from .base import (
+    BaseFetcher,
+    DataFetchError,
+    DataSourceUnavailableError,
+    STANDARD_COLUMNS,
+    normalize_stock_code,
+)
 from .realtime_types import RealtimeSource, UnifiedRealtimeQuote, safe_float
 from .us_index_mapping import is_us_stock_code
 
 logger = logging.getLogger(__name__)
 
 
-class TwelveDataPlanError(DataFetchError):
+class TwelveDataPlanError(DataSourceUnavailableError):
     """当前套餐无权限访问该接口（401/403 等），重试没有意义。"""
 
 
-class TwelveDataRateLimited(DataFetchError):
+class TwelveDataRateLimited(DataSourceUnavailableError):
     """账号触发限流（429），冷却期内不再请求，直接交给下一个数据源。"""
+
+
+class _KeyRateLimited(Exception):
+    """内部信号：当前 Key 触发 429，换下一个 Key 继续。"""
 
 
 def _is_retryable_request_error(exc: BaseException) -> bool:
@@ -57,21 +67,35 @@ class TwelveDataFetcher(BaseFetcher):
     _FALSEY_VALUES = {"0", "false", "no", "off"}
     # 某个接口被套餐限制后，多久内不再尝试（进程内）
     UNSUPPORTED_ENDPOINT_TTL_SECONDS = 3600
-    # 免费档限流窗口：8 credits/分钟。命中 429 后整体冷却，避免整轮分析逐只股票撞墙
+    # 免费档限流窗口：8 credits/分钟/Key。命中 429 后只冷却该 Key，
+    # 有多个 Key 时继续用下一个（多账号的额度是独立的）。
     RATE_LIMIT_COOLDOWN_SECONDS = 60
 
     def __init__(self):
-        self._api_key: str = ""
+        self._api_keys: List[str] = []
+        self._key_index = 0
+        self._key_cooldown: Dict[str, float] = {}
+        self._dead_keys: set = set()
         self._available: Optional[bool] = None
         self._timeout_seconds = self.DEFAULT_TIMEOUT
         self._us_hk_enable = True
         self._symbol_cache: Dict[str, str] = {}
         self._stock_name_cache: Dict[str, str] = {}
         self._unsupported_endpoints: Dict[str, float] = {}
-        self._rate_limited_until: float = 0.0
+
+    @property
+    def _api_key(self) -> str:
+        """兼容旧代码/测试：返回当前主 Key。"""
+        return self._api_keys[0] if self._api_keys else ""
+
+    @_api_key.setter
+    def _api_key(self, value: str) -> None:
+        key = (value or "").strip()
+        self._api_keys = [key] if key else []
 
     def _load_runtime_config(self) -> None:
-        api_key = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
+        raw_keys = (os.getenv("TWELVEDATA_API_KEYS") or "").strip()
+        single_key = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
         timeout_seconds = int(os.getenv("TWELVEDATA_TIMEOUT_SECONDS", str(self.DEFAULT_TIMEOUT)) or self.DEFAULT_TIMEOUT)
         enabled = (os.getenv("TWELVEDATA_US_HK_ENABLE", "true") or "true").strip().lower() not in self._FALSEY_VALUES
 
@@ -79,7 +103,10 @@ class TwelveDataFetcher(BaseFetcher):
             from src.config import get_config
 
             config = get_config()
-            api_key = (getattr(config, "twelvedata_api_key", None) or api_key or "").strip()
+            config_keys = getattr(config, "twelvedata_api_keys", None) or []
+            if config_keys:
+                raw_keys = ",".join(config_keys)
+            single_key = (getattr(config, "twelvedata_api_key", None) or single_key or "").strip()
             timeout_seconds = int(
                 getattr(config, "twelvedata_timeout_seconds", timeout_seconds) or timeout_seconds
             )
@@ -87,7 +114,15 @@ class TwelveDataFetcher(BaseFetcher):
         except Exception:
             logger.debug("[TwelveDataFetcher] 使用环境变量作为运行时配置")
 
-        self._api_key = api_key
+        keys = [key.strip() for key in raw_keys.split(",") if key.strip()]
+        if not keys and single_key:
+            keys = [single_key]
+
+        deduped: List[str] = []
+        for key in keys:
+            if key not in deduped:
+                deduped.append(key)
+        self._api_keys = deduped
         self._timeout_seconds = max(1, int(timeout_seconds))
         self._us_hk_enable = enabled
 
@@ -96,12 +131,16 @@ class TwelveDataFetcher(BaseFetcher):
             return self._available
 
         self._load_runtime_config()
-        self._available = bool(self._api_key and self._us_hk_enable)
+        self._available = bool(self._api_keys and self._us_hk_enable)
         return self._available
 
     def is_api_ready(self) -> bool:
         """供 DataFetcherManager 判断是否应纳入 US/HK API 优先链。"""
         return self._is_available()
+
+    def is_temporarily_unavailable(self) -> bool:
+        """所有 Key 都在冷却时才退出链路，避免每只股票都产生一条跳过日志。"""
+        return self._next_available_key(advance=False) is None
 
     @staticmethod
     def _is_hk_code(stock_code: str) -> bool:
@@ -254,21 +293,41 @@ class TwelveDataFetcher(BaseFetcher):
     )
     def _request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         if not self._is_available():
-            raise DataFetchError("[TwelveDataFetcher] 未配置 TWELVEDATA_API_KEY 或已禁用")
+            raise DataFetchError("[TwelveDataFetcher] 未配置 TWELVEDATA_API_KEY(S) 或已禁用")
 
-        if time.time() < self._rate_limited_until:
-            remaining = int(self._rate_limited_until - time.time())
+        # 轮询可用 Key：某个账号 429 只冷却它自己，换个 Key 继续（多账号额度独立）
+        attempts = max(1, len(self._api_keys))
+        rate_limited_keys: List[str] = []
+        for _ in range(attempts):
+            api_key = self._next_available_key()
+            if not api_key:
+                break
+            try:
+                return self._send(endpoint, params, api_key)
+            except _KeyRateLimited:
+                rate_limited_keys.append(self._mask_key(api_key))
+                self._cool_down_key(api_key)
+                continue
+            except TwelveDataPlanError:
+                raise
+
+        if rate_limited_keys:
             raise TwelveDataRateLimited(
-                f"[TwelveDataFetcher] 限流冷却中（剩余 {remaining}s），本轮交给下一个数据源"
+                "[TwelveDataFetcher] 所有 Key 均触发 429（%s），%ss 内交给下一个数据源"
+                % (", ".join(rate_limited_keys), self.RATE_LIMIT_COOLDOWN_SECONDS)
             )
+        raise TwelveDataRateLimited(
+            "[TwelveDataFetcher] 所有 Key 都在限流冷却中，本轮交给下一个数据源"
+        )
 
-        request_params = {**params, "apikey": self._api_key}
+    def _send(self, endpoint: str, params: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+        request_params = {**params, "apikey": api_key}
         try:
             response = requests.get(
                 f"{self.BASE_URL}/{endpoint}",
                 params=request_params,
                 timeout=self._timeout_seconds,
-                headers={"Authorization": f"apikey {self._api_key}"},
+                headers={"Authorization": f"apikey {api_key}"},
             )
             response.raise_for_status()
         except requests.Timeout as exc:
@@ -276,9 +335,11 @@ class TwelveDataFetcher(BaseFetcher):
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status is not None and int(status) == 429:
-                self._mark_rate_limited()
-                raise TwelveDataRateLimited(
-                    f"[TwelveDataFetcher] 触发限流 HTTP 429，{self.RATE_LIMIT_COOLDOWN_SECONDS}s 内跳过"
+                raise _KeyRateLimited(str(exc)) from exc
+            if status is not None and int(status) == 401:
+                self._dead_keys.add(api_key)
+                raise DataFetchError(
+                    f"[TwelveDataFetcher] Key {self._mask_key(api_key)} 无效（HTTP 401），已停用"
                 ) from exc
             # 其余 4xx 属于套餐/参数问题，重试只会浪费时间
             if status is not None and 400 <= int(status) < 500:
@@ -297,19 +358,55 @@ class TwelveDataFetcher(BaseFetcher):
         if isinstance(payload, dict) and payload.get("status") == "error":
             code = payload.get("code")
             message = payload.get("message") or "unknown error"
+            if str(code) == "429":
+                raise _KeyRateLimited(f"API 错误 code=429: {message}")
             raise DataFetchError(f"[TwelveDataFetcher] API 错误 code={code}: {message}")
 
         return payload
 
-    def _mark_rate_limited(self) -> None:
-        """账号级限流只记一次，冷却期内所有接口直接跳过。"""
-        until = time.time() + self.RATE_LIMIT_COOLDOWN_SECONDS
-        if until <= self._rate_limited_until:
+    @staticmethod
+    def _mask_key(api_key: str) -> str:
+        """日志里只保留 Key 末 4 位。"""
+        if not api_key:
+            return "***"
+        return f"***{api_key[-4:]}" if len(api_key) > 4 else "***"
+
+    def _next_available_key(self, *, advance: bool = True) -> Optional[str]:
+        """轮询返回下一个未冷却/未失效的 Key；全部不可用时返回 None。"""
+        if not self._api_keys:
+            return None
+        now = time.time()
+        total = len(self._api_keys)
+        for offset in range(total):
+            index = (self._key_index + offset) % total
+            key = self._api_keys[index]
+            if key in self._dead_keys:
+                continue
+            until = self._key_cooldown.get(key, 0.0)
+            if until > now:
+                continue
+            if advance:
+                self._key_index = (index + 1) % total
+            return key
+        return None
+
+    def _cool_down_key(self, api_key: str) -> None:
+        """单个 Key 进入冷却；只在该 Key 首次命中时记一条日志。"""
+        now = time.time()
+        if self._key_cooldown.get(api_key, 0.0) > now:
             return
-        self._rate_limited_until = until
+        self._key_cooldown[api_key] = now + self.RATE_LIMIT_COOLDOWN_SECONDS
+        remaining_keys = sum(
+            1
+            for key in self._api_keys
+            if key not in self._dead_keys and self._key_cooldown.get(key, 0.0) <= now
+        )
         logger.warning(
-            "[TwelveDataFetcher] 触发免费档限流（429），%ss 内跳过该数据源，其余股票走 Finnhub/Yfinance",
+            "[TwelveDataFetcher] Key %s 触发免费档限流（429），冷却 %ss；仍有 %d/%d 个 Key 可用",
+            self._mask_key(api_key),
             self.RATE_LIMIT_COOLDOWN_SECONDS,
+            remaining_keys,
+            len(self._api_keys),
         )
 
     def _endpoint_unsupported(self, endpoint: str) -> bool:
@@ -515,8 +612,6 @@ class TwelveDataFetcher(BaseFetcher):
         return round(float(current_volume) / float(shares_base) * 100, 4)
 
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
-
-
         if not self._is_available() or not self._is_supported_market(stock_code):
             return None
 

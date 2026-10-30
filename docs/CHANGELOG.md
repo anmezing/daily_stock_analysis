@@ -165,6 +165,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] 单个模型日配额打满时只把该模型移出候选（30 分钟），同一次调用继续尝试配额独立的 fallback，不再整轮停摆。
 - [改进] 默认模型改为按免费档 RPD 选型：Gemini 3 Flash / 3.8 Flash 免费档仅 20 次/天，`*-flash-lite`（3.1/3.5）为 500 次/天；`GEMINI_MODEL_FALLBACK` 默认值与服务器模板改用 `gemini-3.5-flash-lite`，模板主模型同步调整并注明质量/配额取舍。
 - [修复] TwelveData 命中 429 后进入 60 秒账号级冷却并交给下一个数据源；Finnhub `/stock/candle` 首次返回 403（免费档不含日线接口）后本进程不再尝试，不再每只美股都白跑一次。
+- [改进] 不可用的数据源不再进入链路：冷却中的 TwelveData、日线被判付费专属的 Finnhub 会在组装链路时被跳过（Finnhub 实时报价仍然保留），日志从"尝试/失败/切换"三连降级为一条 DEBUG，不再把可预期的跳过打印成 ERROR。
+- [改进] 美股/港股股票名称解析改为沿用实时行情链路（美股 Finnhub `/search` 优先），不再用 TwelveData 逐只查名称；TwelveData 免费档只有 8 credits/分钟，14 只股票光取名就会把额度耗掉。港股链路仍保留 Akshare 作为最后兜底。
+- [新功能] Twelve Data 支持多账号轮询：新增 `TWELVEDATA_API_KEYS=key1,key2`（单数 `TWELVEDATA_API_KEY` 仍兼容）。429 只冷却当前 Key，同一次请求换下一个 Key 继续；全部 Key 冷却时该源才退出链路，日志里的 Key 一律只显示末 4 位。
+- [新功能] Finnhub 同样支持多账号轮询：新增 `FINNHUB_API_KEYS=key1,key2`（单数仍兼容），行情、名称解析与公司新闻共用这套 Key；429 只冷却当前 Key，401 直接停用该 Key。
 - [修复] 数据源失败日志会把 requests 异常里的完整请求 URL（含 `apikey` / `token`）原样写进日志文件，现在统一打码并截断到 240 字符。
 - [修复] LiteLLM Router 的 `coroutine 'router_cooldown_event_callback' was never awaited` RuntimeWarning 在接管 `showwarning` 后开始刷屏，现一并过滤。
 

@@ -252,8 +252,7 @@ def test_statistics_success_is_still_used():
     assert fetcher._endpoint_unsupported("statistics") is False
 
 
-# --- 429 限流冷却 -----------------------------------------------------------
-
+# --- 429 限流与多 Key 轮询 ------------------------------------------------
 
 def _rate_limited_response(endpoint: str = "time_series"):
     import requests
@@ -265,8 +264,27 @@ def _rate_limited_response(endpoint: str = "time_series"):
     return response
 
 
-def test_429_is_not_retried_and_puts_the_whole_fetcher_on_cooldown():
-    """429 是账号级限额：重试没有意义，而且必须让后续股票直接跳过该源。"""
+def _ok_response(payload: str = '{"values":[]}'):
+    import requests
+
+    response = requests.Response()
+    response.status_code = 200
+    response.url = "https://api.twelvedata.com/time_series"
+    response._content = payload.encode("utf-8")
+    return response
+
+
+def _make_multi_key_fetcher(*keys: str) -> TwelveDataFetcher:
+    fetcher = _make_fetcher()
+    fetcher._api_keys = list(keys)
+    fetcher._key_index = 0
+    fetcher._key_cooldown = {}
+    fetcher._dead_keys = set()
+    return fetcher
+
+
+def test_single_key_429_cools_the_key_and_skips_further_requests():
+    """单 Key：429 之后这个 Key 冷却，后续股票不再发请求。"""
     from data_provider.twelvedata_fetcher import TwelveDataRateLimited
 
     fetcher = _make_fetcher()
@@ -278,23 +296,77 @@ def test_429_is_not_retried_and_puts_the_whole_fetcher_on_cooldown():
             fetcher._request("time_series", {"symbol": "MU"})
 
         assert mock_get.call_count == 1
-        assert fetcher._rate_limited_until > 0
+        assert fetcher.is_temporarily_unavailable() is True
 
-        # 冷却期内不再发请求，直接抛出限流错误
         with pytest.raises(TwelveDataRateLimited):
             fetcher._request("time_series", {"symbol": "AVGO"})
         assert mock_get.call_count == 1
 
 
-def test_rate_limit_cooldown_expires():
-    fetcher = _make_fetcher()
-    fetcher._rate_limited_until = 1.0  # 早已过期
+def test_second_key_takes_over_when_the_first_one_is_throttled():
+    """多 Key：第一个账号 429 时换下一个 Key 继续，不惊动上层链路。"""
+    fetcher = _make_multi_key_fetcher("key-aaaa1111", "key-bbbb2222")
 
     with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
-        response = _forbidden_response()
-        response.status_code = 200
-        response._content = b'{"values":[]}'
-        mock_get.return_value = response
+        mock_get.side_effect = [_rate_limited_response(), _ok_response()]
+
+        payload = fetcher._request("time_series", {"symbol": "MU"})
+
+        assert payload == {"values": []}
+        assert mock_get.call_count == 2
+        sent_keys = [call.kwargs["params"]["apikey"] for call in mock_get.call_args_list]
+        assert sent_keys == ["key-aaaa1111", "key-bbbb2222"]
+        # 只有一个 Key 冷却，源整体仍可用
+        assert fetcher.is_temporarily_unavailable() is False
+        assert fetcher._key_cooldown["key-aaaa1111"] > 0
+
+
+def test_all_keys_throttled_marks_the_source_unavailable():
+    from data_provider.twelvedata_fetcher import TwelveDataRateLimited
+
+    fetcher = _make_multi_key_fetcher("key-aaaa1111", "key-bbbb2222")
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        mock_get.return_value = _rate_limited_response()
+
+        with pytest.raises(TwelveDataRateLimited):
+            fetcher._request("time_series", {"symbol": "MU"})
+
+        assert mock_get.call_count == 2
+        assert fetcher.is_temporarily_unavailable() is True
+
+
+def test_keys_are_rotated_between_requests():
+    fetcher = _make_multi_key_fetcher("key-aaaa1111", "key-bbbb2222")
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        mock_get.return_value = _ok_response()
+
+        for _ in range(4):
+            fetcher._request("time_series", {"symbol": "MU"})
+
+        sent_keys = [call.kwargs["params"]["apikey"] for call in mock_get.call_args_list]
+
+    assert sent_keys == [
+        "key-aaaa1111", "key-bbbb2222", "key-aaaa1111", "key-bbbb2222",
+    ]
+
+
+def test_masked_key_never_leaks_the_full_value():
+    fetcher = _make_fetcher()
+
+    masked = fetcher._mask_key("e6f0974f1d24e5b7a374e0359c3638")
+
+    assert masked.endswith("3638")
+    assert "e6f0974f" not in masked
+
+
+def test_rate_limit_cooldown_expires():
+    fetcher = _make_fetcher()
+    fetcher._key_cooldown = {fetcher._api_key: 1.0}  # 早已过期
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        mock_get.return_value = _ok_response()
 
         assert fetcher._request("time_series", {"symbol": "MU"}) == {"values": []}
         assert mock_get.call_count == 1

@@ -688,13 +688,15 @@ class Config:
     save_context_snapshot: bool = True
 
     # === Twelve Data 数据源配置 ===
-    twelvedata_api_key: Optional[str] = None
+    twelvedata_api_keys: List[str] = field(default_factory=list)  # 多账号轮询
+    twelvedata_api_key: Optional[str] = None  # 兼容单 Key（= 第一个 Key）
     twelvedata_priority: int = 2
     twelvedata_timeout_seconds: int = 10
     twelvedata_us_hk_enable: bool = True
 
     # === Finnhub 数据源配置（仅美股）===
-    finnhub_api_key: Optional[str] = None
+    finnhub_api_keys: List[str] = field(default_factory=list)  # 多账号轮询
+    finnhub_api_key: Optional[str] = None  # 兼容单 Key（= 第一个 Key）
 
     # === AlphaVantage 数据源配置（仅美股）===
     alphavantage_api_key: Optional[str] = None
@@ -1155,6 +1157,32 @@ class Config:
             else legacy_run_immediately
         )
 
+        # Twelve Data 多账号轮询：TWELVEDATA_API_KEYS（逗号分隔）优先，
+        # 兼容旧的单数 TWELVEDATA_API_KEY。
+        _twelvedata_api_keys = [
+            key.strip()
+            for key in (os.getenv('TWELVEDATA_API_KEYS') or '').split(',')
+            if key.strip()
+        ]
+        if not _twelvedata_api_keys:
+            _single_twelvedata_key = (os.getenv('TWELVEDATA_API_KEY') or '').strip()
+            if _single_twelvedata_key:
+                _twelvedata_api_keys = [_single_twelvedata_key]
+        # 去重，避免同一个 Key 写两遍
+        _twelvedata_api_keys = list(dict.fromkeys(_twelvedata_api_keys))
+
+        # Finnhub 同理：FINNHUB_API_KEYS（逗号分隔）优先，兼容单数。
+        _finnhub_api_keys = [
+            key.strip()
+            for key in (os.getenv('FINNHUB_API_KEYS') or '').split(',')
+            if key.strip()
+        ]
+        if not _finnhub_api_keys:
+            _single_finnhub_key = (os.getenv('FINNHUB_API_KEY') or '').strip()
+            if _single_finnhub_key:
+                _finnhub_api_keys = [_single_finnhub_key]
+        _finnhub_api_keys = list(dict.fromkeys(_finnhub_api_keys))
+
         return cls(
             stock_list=stock_list,
             feishu_app_id=os.getenv('FEISHU_APP_ID'),
@@ -1314,11 +1342,13 @@ class Config:
             sqlite_write_retry_max=parse_env_int(os.getenv('SQLITE_WRITE_RETRY_MAX'), 3, field_name='SQLITE_WRITE_RETRY_MAX', minimum=0),
             sqlite_write_retry_base_delay=parse_env_float(os.getenv('SQLITE_WRITE_RETRY_BASE_DELAY'), 0.2, field_name='SQLITE_WRITE_RETRY_BASE_DELAY', minimum=0.0),
             save_context_snapshot=os.getenv('SAVE_CONTEXT_SNAPSHOT', 'true').lower() == 'true',
-            twelvedata_api_key=os.getenv('TWELVEDATA_API_KEY') or None,
+            twelvedata_api_keys=_twelvedata_api_keys,
+            twelvedata_api_key=(_twelvedata_api_keys[0] if _twelvedata_api_keys else None),
             twelvedata_priority=parse_env_int(os.getenv('TWELVEDATA_PRIORITY'), 2, field_name='TWELVEDATA_PRIORITY', minimum=0),
             twelvedata_timeout_seconds=parse_env_int(os.getenv('TWELVEDATA_TIMEOUT_SECONDS'), 10, field_name='TWELVEDATA_TIMEOUT_SECONDS', minimum=1),
             twelvedata_us_hk_enable=parse_env_bool(os.getenv('TWELVEDATA_US_HK_ENABLE'), True),
-            finnhub_api_key=os.getenv('FINNHUB_API_KEY') or None,
+            finnhub_api_keys=_finnhub_api_keys,
+            finnhub_api_key=(_finnhub_api_keys[0] if _finnhub_api_keys else None),
             alphavantage_api_key=os.getenv('ALPHAVANTAGE_API_KEY') or None,
             longbridge_app_key=os.getenv('LONGBRIDGE_APP_KEY') or None,
             longbridge_app_secret=os.getenv('LONGBRIDGE_APP_SECRET') or None,

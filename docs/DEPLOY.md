@@ -565,6 +565,26 @@ chmod 600 .env
 > **关于 Agent 模式**：`AGENT_MODE=true` 会走多 Agent 编排，和标准分析链是两套提示词/工具路径。  
 > 最近的日期分离、regime、基本面入词、数值校验主要修在标准链；建议服务器先用 `AGENT_MODE=false`，确认分析结果稳定后再决定是否开 Agent。
 
+### 4. 启动前校验 `.env`
+
+```bash
+python scripts/check_server_env.py            # 默认读 ./.env，按容器访问宿主机检查
+python scripts/check_server_env.py --host     # 直接在宿主机跑（非 Docker）时用
+python scripts/check_server_env.py --strict   # 警告也算失败，适合放进部署流水线
+```
+
+脚本只读、不会改文件，也不会把密钥原文打印出来。它会检查：
+
+- `DATABASE_URL`：占位符、`postgres://` 旧前缀、仍指向 Supabase、容器里误用 `127.0.0.1`；
+- LLM：没有任何 Key、Key 还是 `CHANGE_ME`、`LITELLM_MODEL` 缺少 provider 前缀、`GEMINI_MODEL` 与 `LITELLM_MODEL` 同时设置打架；
+- 调度：`SCHEDULE_ENABLED=true`（分容器部署会打不开网页）、`SCHEDULE_TIME` 格式、启动即跑一轮；
+- 自选股：混入 A 股代码、数量过多；
+- 运行参数：`ANALYSIS_DELAY` / `MAX_WORKERS` 过大、`GEMINI_REQUEST_DELAY` 过短、`BACKTEST_EXTRA_WINDOWS` 非法；
+- 安全：`ADMIN_AUTH_ENABLED=false`、`.env` 权限过于宽松、重复键、行内注释；
+- 完整性：模板里哪些键还没写、`.env` 里有没有拼错的未知键。
+
+退出码 `0` 表示无错误，`1` 表示存在 error。
+
 首次启动会自动 `create_all` 并执行兼容迁移（新增列），不需要手工建表。
 
 ### 4. 启动

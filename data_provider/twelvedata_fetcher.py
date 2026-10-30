@@ -35,9 +35,13 @@ class TwelveDataPlanError(DataFetchError):
     """当前套餐无权限访问该接口（401/403 等），重试没有意义。"""
 
 
+class TwelveDataRateLimited(DataFetchError):
+    """账号触发限流（429），冷却期内不再请求，直接交给下一个数据源。"""
+
+
 def _is_retryable_request_error(exc: BaseException) -> bool:
-    """只重试网络类错误和临时性失败，套餐/参数类错误不重试。"""
-    if isinstance(exc, TwelveDataPlanError):
+    """只重试网络类错误和临时性失败，套餐/参数/限流类错误不重试。"""
+    if isinstance(exc, (TwelveDataPlanError, TwelveDataRateLimited)):
         return False
     return isinstance(exc, (requests.RequestException, DataFetchError))
 
@@ -53,6 +57,8 @@ class TwelveDataFetcher(BaseFetcher):
     _FALSEY_VALUES = {"0", "false", "no", "off"}
     # 某个接口被套餐限制后，多久内不再尝试（进程内）
     UNSUPPORTED_ENDPOINT_TTL_SECONDS = 3600
+    # 免费档限流窗口：8 credits/分钟。命中 429 后整体冷却，避免整轮分析逐只股票撞墙
+    RATE_LIMIT_COOLDOWN_SECONDS = 60
 
     def __init__(self):
         self._api_key: str = ""
@@ -62,6 +68,7 @@ class TwelveDataFetcher(BaseFetcher):
         self._symbol_cache: Dict[str, str] = {}
         self._stock_name_cache: Dict[str, str] = {}
         self._unsupported_endpoints: Dict[str, float] = {}
+        self._rate_limited_until: float = 0.0
 
     def _load_runtime_config(self) -> None:
         api_key = (os.getenv("TWELVEDATA_API_KEY") or "").strip()
@@ -249,6 +256,12 @@ class TwelveDataFetcher(BaseFetcher):
         if not self._is_available():
             raise DataFetchError("[TwelveDataFetcher] 未配置 TWELVEDATA_API_KEY 或已禁用")
 
+        if time.time() < self._rate_limited_until:
+            remaining = int(self._rate_limited_until - time.time())
+            raise TwelveDataRateLimited(
+                f"[TwelveDataFetcher] 限流冷却中（剩余 {remaining}s），本轮交给下一个数据源"
+            )
+
         request_params = {**params, "apikey": self._api_key}
         try:
             response = requests.get(
@@ -262,8 +275,13 @@ class TwelveDataFetcher(BaseFetcher):
             raise DataFetchError(f"[TwelveDataFetcher] 请求超时: {exc}") from exc
         except requests.HTTPError as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            # 4xx（除限流 429）属于套餐/参数问题，重试只会浪费时间
-            if status is not None and 400 <= int(status) < 500 and int(status) != 429:
+            if status is not None and int(status) == 429:
+                self._mark_rate_limited()
+                raise TwelveDataRateLimited(
+                    f"[TwelveDataFetcher] 触发限流 HTTP 429，{self.RATE_LIMIT_COOLDOWN_SECONDS}s 内跳过"
+                ) from exc
+            # 其余 4xx 属于套餐/参数问题，重试只会浪费时间
+            if status is not None and 400 <= int(status) < 500:
                 raise TwelveDataPlanError(
                     f"[TwelveDataFetcher] 接口不可用 endpoint={endpoint} HTTP {status}"
                 ) from exc
@@ -282,6 +300,17 @@ class TwelveDataFetcher(BaseFetcher):
             raise DataFetchError(f"[TwelveDataFetcher] API 错误 code={code}: {message}")
 
         return payload
+
+    def _mark_rate_limited(self) -> None:
+        """账号级限流只记一次，冷却期内所有接口直接跳过。"""
+        until = time.time() + self.RATE_LIMIT_COOLDOWN_SECONDS
+        if until <= self._rate_limited_until:
+            return
+        self._rate_limited_until = until
+        logger.warning(
+            "[TwelveDataFetcher] 触发免费档限流（429），%ss 内跳过该数据源，其余股票走 Finnhub/Yfinance",
+            self.RATE_LIMIT_COOLDOWN_SECONDS,
+        )
 
     def _endpoint_unsupported(self, endpoint: str) -> bool:
         """该接口是否在 TTL 内被判定为套餐不支持。"""

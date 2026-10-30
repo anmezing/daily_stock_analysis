@@ -16,6 +16,7 @@
 
 import logging
 import random
+import re
 import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
@@ -38,6 +39,16 @@ logger = logging.getLogger(__name__)
 # === 标准化列名定义 ===
 STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
 
+# URL / 表单里的密钥参数：apikey、api_key、token、access_token、key、secret
+_SECRET_QUERY_PATTERN = re.compile(
+    r"(?i)\b(apikey|api_key|access_token|token|secret|key)=([^&\s'\"<>]+)"
+)
+
+
+def _redact_url_secrets(text: str) -> str:
+    """把 URL 查询串里的密钥替换成 ***，避免日志落盘泄露。"""
+    return _SECRET_QUERY_PATTERN.sub(r"\1=***", text)
+
 
 def unwrap_exception(exc: Exception) -> Exception:
     """
@@ -59,11 +70,17 @@ def unwrap_exception(exc: Exception) -> Exception:
 def summarize_exception(exc: Exception) -> Tuple[str, str]:
     """
     Build a stable summary for logs while preserving the application-layer message.
+
+    第三方库的 HTTP 异常会把完整请求 URL（含 apikey/token 查询参数）带进消息，
+    直接写日志等于把密钥落盘。这里统一打码并截断，日志里只留可操作的信息。
     """
     root = unwrap_exception(exc)
     error_type = type(root).__name__
     message = str(exc).strip() or str(root).strip() or error_type
-    return error_type, " ".join(message.split())
+    message = _redact_url_secrets(" ".join(message.split()))
+    if len(message) > 240:
+        message = message[:240] + "..."
+    return error_type, message
 
 
 def normalize_stock_code(stock_code: str) -> str:

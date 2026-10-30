@@ -115,6 +115,24 @@ class TestFinnhubFetcherFetchRaw(unittest.TestCase):
             self.fetcher._fetch_raw_data('INVALIDX', '2024-06-10', '2024-06-11')
 
     @patch('data_provider.finnhub_fetcher.requests.get')
+    def test_candle_403_disables_the_endpoint_for_the_process(self, mock_get):
+        """免费档不含 /stock/candle：命中 403 后不该每只股票再撞一次。"""
+        from data_provider.base import DataFetchError
+
+        mock_get.return_value = _make_mock_response({}, status_code=403)
+
+        with self.assertRaises(DataFetchError):
+            self.fetcher._fetch_raw_data('AAPL', '2024-06-10', '2024-06-11')
+
+        self.assertTrue(self.fetcher._candle_forbidden)
+        self.assertEqual(mock_get.call_count, 1)
+
+        # 后续标的直接跳过，不再发请求
+        with self.assertRaises(DataFetchError):
+            self.fetcher._fetch_raw_data('MSFT', '2024-06-10', '2024-06-11')
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch('data_provider.finnhub_fetcher.requests.get')
     def test_fetch_raw_http_error(self, mock_get):
         from data_provider.base import DataFetchError
         mock_get.side_effect = Exception("connection timeout")

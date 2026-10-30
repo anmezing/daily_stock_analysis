@@ -35,6 +35,9 @@ class FinnhubFetcher(BaseFetcher):
 
         config = get_config()
         self._api_key = getattr(config, "finnhub_api_key", None) or os.getenv("FINNHUB_API_KEY")
+        # /stock/candle 属于付费接口：免费档恒返回 403。命中一次后进程内不再尝试，
+        # 免得每只美股都要多花一次请求 + 一行告警。
+        self._candle_forbidden = False
         if not self._api_key:
             logger.debug("[Finnhub] 未配置 FINNHUB_API_KEY，数据源不参与链路")
 
@@ -54,6 +57,10 @@ class FinnhubFetcher(BaseFetcher):
             raise DataFetchError("[Finnhub] 未配置 FINNHUB_API_KEY")
         if not self._is_us_stock(stock_code):
             raise DataFetchError(f"[Finnhub] 不支持的市场代码: {stock_code}")
+        if self._candle_forbidden:
+            raise DataFetchError(
+                "[Finnhub] /stock/candle 需要付费档（本进程已判定 403），日线改由下一个数据源提供"
+            )
 
         symbol = stock_code.strip().upper()
         start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
@@ -71,8 +78,19 @@ class FinnhubFetcher(BaseFetcher):
         try:
             self.random_sleep(0.3, 0.8)
             resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code in (401, 403):
+                self._candle_forbidden = True
+                logger.info(
+                    "[Finnhub] /stock/candle 返回 HTTP %s（免费档不含日线接口），本进程不再尝试",
+                    resp.status_code,
+                )
+                raise DataFetchError(
+                    f"[Finnhub] 日线接口需要付费档 symbol={symbol} HTTP {resp.status_code}"
+                )
             resp.raise_for_status()
             data = resp.json()
+        except DataFetchError:
+            raise
         except Exception as e:
             raise DataFetchError(f"[Finnhub] 请求失败 symbol={symbol}: {e}") from e
 

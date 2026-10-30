@@ -250,3 +250,51 @@ def test_statistics_success_is_still_used():
     assert mock_request.call_count == 1
     assert rate == pytest.approx(1.0)
     assert fetcher._endpoint_unsupported("statistics") is False
+
+
+# --- 429 限流冷却 -----------------------------------------------------------
+
+
+def _rate_limited_response(endpoint: str = "time_series"):
+    import requests
+
+    response = requests.Response()
+    response.status_code = 429
+    response.url = f"https://api.twelvedata.com/{endpoint}"
+    response._content = b'{"code":429,"message":"Too Many Requests","status":"error"}'
+    return response
+
+
+def test_429_is_not_retried_and_puts_the_whole_fetcher_on_cooldown():
+    """429 是账号级限额：重试没有意义，而且必须让后续股票直接跳过该源。"""
+    from data_provider.twelvedata_fetcher import TwelveDataRateLimited
+
+    fetcher = _make_fetcher()
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        mock_get.return_value = _rate_limited_response()
+
+        with pytest.raises(TwelveDataRateLimited):
+            fetcher._request("time_series", {"symbol": "MU"})
+
+        assert mock_get.call_count == 1
+        assert fetcher._rate_limited_until > 0
+
+        # 冷却期内不再发请求，直接抛出限流错误
+        with pytest.raises(TwelveDataRateLimited):
+            fetcher._request("time_series", {"symbol": "AVGO"})
+        assert mock_get.call_count == 1
+
+
+def test_rate_limit_cooldown_expires():
+    fetcher = _make_fetcher()
+    fetcher._rate_limited_until = 1.0  # 早已过期
+
+    with patch("data_provider.twelvedata_fetcher.requests.get") as mock_get:
+        response = _forbidden_response()
+        response.status_code = 200
+        response._content = b'{"values":[]}'
+        mock_get.return_value = response
+
+        assert fetcher._request("time_series", {"symbol": "MU"}) == {"values": []}
+        assert mock_get.call_count == 1

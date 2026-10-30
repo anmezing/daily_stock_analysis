@@ -130,6 +130,13 @@ def _get_opt_in_payload(model: str, opt_in: Dict[str, dict]) -> Optional[dict]:
     return None
 
 
+def _short_error(exc: BaseException, limit: int = 240) -> str:
+    """只保留异常首行，避免把 LiteLLM 附带的长 traceback 灌进日志和报告。"""
+    lines = [line.strip() for line in str(exc).splitlines() if line.strip()]
+    first = lines[0] if lines else type(exc).__name__
+    return first if len(first) <= limit else first[:limit] + "..."
+
+
 def get_thinking_extra_body(model: str) -> Optional[dict]:
     """Return extra_body for thinking mode, or None.
 
@@ -449,13 +456,16 @@ class LLMToolAdapter:
                         else:
                             time.sleep(backoff_sleep)
                 else:
-                    logger.warning("Agent LLM call failed with %s: %s", model, e)
+                    logger.warning("Agent LLM call failed with %s: %s", model, _short_error(e))
+                    logger.debug("Agent LLM call traceback for %s", model, exc_info=True)
                 last_error = e
                 continue
 
         suffix = " (rate-limit encountered during fallback)" if hit_rate_limit else ""
-        error_msg = f"All LLM models failed{suffix}. Last error: {last_error}"
+        error_msg = f"All LLM models failed{suffix}. Last error: {_short_error(last_error) if last_error else 'unknown'}"
         logger.error(error_msg)
+        if last_error is not None:
+            logger.debug("All LLM models failed, last traceback", exc_info=last_error)
         return LLMResponse(content=error_msg, provider="error")
 
     @staticmethod

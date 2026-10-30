@@ -39,14 +39,77 @@ class RelativePathFormatter(logging.Formatter):
         return super().format(record)
 
 
-
 # 默认需要降低日志级别的第三方库
 DEFAULT_QUIET_LOGGERS = [
     'urllib3',
     'sqlalchemy',
     'google',
     'httpx',
+    'httpcore',
+    'yfinance',
+    'peewee',
+    'charset_normalizer',
+    'asyncio',
+    'python_multipart',
+    'apscheduler',
 ]
+
+# 这些库的 INFO/DEBUG 只在调试日志里保留，控制台和常规日志只放 ERROR
+NOISY_THIRD_PARTY_PREFIXES = (
+    'litellm',
+    'openai',
+    'anthropic',
+    'httpx',
+    'httpcore',
+    'urllib3',
+    'yfinance',
+    'peewee',
+    'pandas',
+)
+
+
+class ThirdPartyNoiseFilter(logging.Filter):
+    """把第三方库（LiteLLM / HTTP 客户端 / 行情库）的 INFO 噪音挡在控制台外。
+
+    调试日志 handler 不挂这个过滤器，需要排查时仍然能看到完整输出。
+    """
+
+    def __init__(self, prefixes=NOISY_THIRD_PARTY_PREFIXES):
+        super().__init__()
+        self.prefixes = tuple(prefix.lower() for prefix in prefixes)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = record.name.lower()
+        if any(name.startswith(prefix) for prefix in self.prefixes):
+            return record.levelno >= logging.ERROR
+        return True
+
+
+def _silence_existing_litellm_loggers() -> None:
+    """LiteLLM 会创建 ``LiteLLM``、``LiteLLM Router`` 等独立 logger。
+
+    它们不是 ``litellm`` 的子 logger，逐个按名字前缀压到 ERROR，
+    避免 ``LITELLM_LOG=ERROR`` 不生效时控制台被路由/重试日志刷屏。
+    """
+    for name in ('litellm', 'LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', 'LiteLLM Fallback'):
+        logging.getLogger(name).setLevel(logging.ERROR)
+    for name in list(logging.root.manager.loggerDict):
+        lowered = name.lower()
+        if lowered.startswith('litellm') or lowered.startswith('openai') or lowered.startswith('anthropic'):
+            logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def _configure_third_party_warnings() -> None:
+    """压掉行情库触发的 pandas 弃用警告。
+
+    yfinance 仍在使用 ``DataFrame.sort_index(inplace=True)`` 这类写法，
+    每次拉行情都会刷屏，但对我们没有可操作性，统一在 yfinance 上下文里忽略。
+    """
+    import warnings
+
+    warnings.filterwarnings('ignore', category=FutureWarning, module=r'yfinance(\..*)?')
+    warnings.filterwarnings('ignore', category=DeprecationWarning, module=r'yfinance(\..*)?')
+    warnings.filterwarnings('ignore', message=r'.*inplace keyword.*', category=FutureWarning)
 
 
 def setup_logging(
@@ -103,7 +166,6 @@ def setup_logging(
     console_handler.setLevel(level)
     console_handler.setFormatter(rel_formatter)
     root_logger.addHandler(console_handler)
-
     # Handler 2: 常规日志文件（INFO 级别，10MB 轮转）
     file_handler = RotatingFileHandler(
         log_file,
@@ -133,6 +195,13 @@ def setup_logging(
 
     for logger_name in quiet_loggers:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    # 控制台与常规日志只保留第三方库的 ERROR，调试日志仍保留全部
+    noise_filter = ThirdPartyNoiseFilter()
+    console_handler.addFilter(noise_filter)
+    file_handler.addFilter(noise_filter)
+    _silence_existing_litellm_loggers()
+    _configure_third_party_warnings()
 
     # 输出初始化完成信息（使用相对路径）
     try:

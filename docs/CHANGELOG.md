@@ -162,6 +162,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] Agent 工具 `search_comprehensive_intel` 给 `format_intel_report()` 传了不存在的 `stock_code` 参数，导致该工具每次都报 `unexpected keyword argument`、只能退回逐个搜索工具；现在按真实函数签名调用。
 - [修复] LLM 全部失败（免费档日配额打满、fallback 模型被下线）时，Agent 链与标准链都不再把"评分 50 / 观望 / 未知"的占位结果写进 `analysis_history`，避免污染 Web 历史与回测/学习样本；失败原因改为 ERROR 级日志逐只列出。
 - [改进] LLM 路由记住模型健康状态：404 / `no longer available` 的模型在本进程内直接跳过；免费档每日配额打满后暂停 30 分钟内的所有 LLM 调用并快速失败，不再对剩余股票逐个重试三个模型。
+- [改进] 单个模型日配额打满时只把该模型移出候选（30 分钟），同一次调用继续尝试配额独立的 fallback，不再整轮停摆。
+- [改进] 默认模型改为按免费档 RPD 选型：Gemini 3 Flash / 3.8 Flash 免费档仅 20 次/天，`*-flash-lite`（3.1/3.5）为 500 次/天；`GEMINI_MODEL_FALLBACK` 默认值与服务器模板改用 `gemini-3.5-flash-lite`，模板主模型同步调整并注明质量/配额取舍。
 - [修复] TwelveData 命中 429 后进入 60 秒账号级冷却并交给下一个数据源；Finnhub `/stock/candle` 首次返回 403（免费档不含日线接口）后本进程不再尝试，不再每只美股都白跑一次。
 - [修复] 数据源失败日志会把 requests 异常里的完整请求 URL（含 `apikey` / `token`）原样写进日志文件，现在统一打码并截断到 240 字符。
 - [修复] LiteLLM Router 的 `coroutine 'router_cooldown_event_callback' was never awaited` RuntimeWarning 在接管 `showwarning` 后开始刷屏，现一并过滤。

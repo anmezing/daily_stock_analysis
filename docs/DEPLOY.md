@@ -601,7 +601,7 @@ chmod 600 .env
 - **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `hk+us` / `all`，不要留默认的 `cn`；组合写法兼容 `us/hk`、`us,hk`。
 - **`REALTIME_SOURCE_PRIORITY`** 只对 A 股生效；美股/港股走各自的优先链，不需要改。
 - **搜索 Key**：失效的 Tavily/Bocha Key 会拖慢整轮分析，服务器上只保留有效的。
-- **LLM 免费配额**：`gemini-3-flash` 免费档是 **20 次/天/Key（按模型 × 项目计）**。Agent 模式每只股票要 3~6 次调用，14 只股票 = 50+ 次，必然打满。要么 `AGENT_MODE=false` 把每只股票压到 1 次调用，要么多加几个 Key；配额打满后进程会暂停 30 分钟内的 LLM 调用，并把本轮股票记为失败（不再写入占位分析）。
+- **LLM 免费配额**：RPD（次/天/项目）差异极大——`gemini-3-flash` / `3.8-flash` 只有 **20 次/天**，`gemini-3.1/3.5-flash-lite` 有 **500 次/天**。Agent 模式每只股票 3~6 次调用，14 只 = 50~80 次，所以模板默认用 `gemini/gemini-3.5-flash-lite` 跑量；配额打满后进程会跳过该模型并继续用 fallback，全部打满才暂停 30 分钟（此时本轮股票记为失败，不再写占位分析）。
 - **`LITELLM_FALLBACK_MODELS` 必须是仍然在售的模型**：`gemini-2.5-flash` 已被 Google 下线，配它等于没有 fallback，日志会直接出现 `This model ... is no longer available`。
 
 #### 从 GitHub Actions 迁移配置

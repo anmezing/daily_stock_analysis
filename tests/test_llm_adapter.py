@@ -119,6 +119,38 @@ class TestLLMToolAdapterFallback(unittest.TestCase):
             "gemini/gemini-3-flash",
         ])
 
+    def test_exhausted_model_is_skipped_while_fallback_keeps_working(self) -> None:
+        """主模型日配额打满时，只跳过它，剩下的调用继续走 fallback。"""
+        adapter = LLMToolAdapter.__new__(LLMToolAdapter)
+        adapter._config = SimpleNamespace(
+            litellm_model="gemini/gemini-3-flash",
+            litellm_fallback_models=["gemini/gemini-3.5-flash-lite"],
+            agent_litellm_model=None,
+        )
+
+        calls = []
+
+        def _side_effect(_messages, _tools, model, **_kwargs):
+            calls.append(model)
+            if model == "gemini/gemini-3-flash":
+                raise RuntimeError(
+                    "litellm.RateLimitError: 429 You exceeded your current quota\n"
+                    "generate_content_free_tier_requests, limit: 20"
+                )
+            return LLMResponse(content="ok", provider="gemini", model=model)
+
+        adapter._call_litellm_model = _side_effect
+
+        first = adapter.call_completion([{"role": "user", "content": "hi"}], tools=None)
+        second = adapter.call_completion([{"role": "user", "content": "hi"}], tools=None)
+
+        self.assertEqual(first.content, "ok")
+        self.assertEqual(second.content, "ok")
+        self.assertEqual(calls, [
+            "gemini/gemini-3-flash", "gemini/gemini-3.5-flash-lite",
+            "gemini/gemini-3.5-flash-lite",
+        ])
+
     def test_exhausted_quota_fails_fast_without_calling_models(self) -> None:
         """配额打满后，剩下的股票应该立刻失败，而不是每只都重试一遍模型。"""
         adapter = LLMToolAdapter.__new__(LLMToolAdapter)

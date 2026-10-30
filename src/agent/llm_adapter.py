@@ -34,10 +34,12 @@ from src.utils.json_sanitize import sanitize_non_finite
 logger = logging.getLogger(__name__)
 
 # 进程内记忆：Google 免费档的每日配额是"按模型 × 项目"算的，一旦打满，继续重试
-# 只会拖慢整轮分析（每只股票都要把这几个模型试一遍）。这里记住两类状态：
+# 只会拖慢整轮分析（每只股票都要把这几个模型试一遍）。这里记住三类状态：
 # - 已被服务端下线的模型（404 / no longer available），后续直接跳过；
-# - 配额耗尽的冷却期，期间一律快速失败，交由上层记录"本轮失败"而不是产出占位分析。
+# - 单个模型当日配额耗尽，冷却期内不再把它排在前面；
+# - 所有模型都失败的冷却期，期间一律快速失败，交由上层记录"本轮失败"。
 _DEAD_MODELS: set = set()
+_MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 _QUOTA_COOLDOWN_UNTIL: float = 0.0
 
 # 每日配额按天重置，冷却期取 30 分钟：足够让本轮剩余股票不再空转，
@@ -183,9 +185,24 @@ def _remaining_quota_cooldown() -> float:
     return max(0.0, _QUOTA_COOLDOWN_UNTIL - time.time())
 
 
+def _model_in_cooldown(model: str) -> bool:
+    until = _MODEL_COOLDOWN_UNTIL.get(model, 0.0)
+    if until <= 0:
+        return False
+    if until <= time.time():
+        _MODEL_COOLDOWN_UNTIL.pop(model, None)
+        return False
+    return True
+
+
+def _mark_model_quota_exhausted(model: str) -> None:
+    _MODEL_COOLDOWN_UNTIL[model] = time.time() + QUOTA_COOLDOWN_SECONDS
+
+
 def reset_model_health_cache() -> None:
     """测试/长驻进程手动重置模型健康状态。"""
     _DEAD_MODELS.clear()
+    _MODEL_COOLDOWN_UNTIL.clear()
     global _QUOTA_COOLDOWN_UNTIL
     _QUOTA_COOLDOWN_UNTIL = 0.0
 
@@ -469,10 +486,10 @@ class LLMToolAdapter:
         models_to_try = [
             model
             for model in get_effective_agent_models_to_try(config)
-            if model not in _DEAD_MODELS
+            if model not in _DEAD_MODELS and not _model_in_cooldown(model)
         ]
         if not models_to_try:
-            error_msg = "All configured LLM models are unavailable (removed by the provider or disabled)"
+            error_msg = "All configured LLM models are unavailable (removed by the provider, disabled, or out of quota)"
             logger.error(error_msg)
             return LLMResponse(content=error_msg, provider="error")
 
@@ -523,7 +540,15 @@ class LLMToolAdapter:
                     logger.warning("Agent LLM rate-limited on %s: %s", model, _short_error(e))
                     hit_rate_limit = True
                     if _is_quota_error(e):
+                        # 单个模型日配额打满：这个模型今天没戏了，但同一次调用
+                        # 仍继续尝试后面的模型（通常配额独立）。
                         hit_quota_limit = True
+                        _mark_model_quota_exhausted(model)
+                        logger.warning(
+                            "Agent LLM model %s hit its daily quota, skipped for %ss",
+                            model,
+                            QUOTA_COOLDOWN_SECONDS,
+                        )
                     # Avoid blind backoff across different providers; cross-provider
                     # fallback usually means different accounts/rate-limit buckets.
                     should_backoff = (

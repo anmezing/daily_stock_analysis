@@ -1,13 +1,18 @@
-# Production server: Web UI/API (server) + scheduled analysis (analyzer).
+# Application stack: Web UI/API (server) + scheduled analysis (analyzer).
 #
-#   cp docker/env.server.example .env
+#   docker network create dsa-net                                    # 一次性
+#   docker compose -f docker/docker-compose.db.yml up -d             # 数据库栈
 #   python scripts/check_server_env.py
 #   docker compose -f docker/docker-compose.server.yml up -d --build
 #
-# `server` only serves HTTP on 127.0.0.1:${API_PORT} for Caddy; `analyzer` runs
-# `main.py --schedule` in the America/New_York timezone. Disable the GitHub
-# Actions schedule when this runs, otherwise the same stocks are analyzed twice
-# and LLM quota is wasted.
+# PostgreSQL 由 docker/docker-compose.db.yml 单独运行，通过外部网络 dsa-net
+# 以别名 `db` 暴露给本栈（DATABASE_URL=...@db:5432/...）。
+# 想改用宿主机数据库时，把 DATABASE_URL 换成 host.docker.internal 即可，
+# 本栈无需改动（extra_hosts 已配置）。
+#
+# `server` 只对 127.0.0.1:${API_PORT} 提供 HTTP 给 Caddy；`analyzer` 用
+# America/New_York 时区执行 `main.py --schedule`。跑这套时请关掉 GitHub
+# Actions 的定时任务，否则同一批股票会被分析两次、浪费 LLM 配额。
 name: daily-stock-analysis
 
 services:
@@ -24,7 +29,9 @@ services:
       - TZ=Asia/Shanghai
       - WEBUI_HOST=0.0.0.0
       - WEBUI_ENABLED=true
-    # Reach a PostgreSQL running on the Docker host via host.docker.internal.
+    networks:
+      - dsa-net
+    # Also allows reaching a PostgreSQL running on the Docker host.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # Only Caddy (on the host) can reach this port; never expose 8000 publicly.
@@ -62,14 +69,16 @@ services:
       # US market schedule: SCHEDULE_TIME is interpreted in this timezone.
       # Set SCHEDULE_TIME=10:00 in .env for 10:00 ET; DST handled by tzdata.
       - TZ=America/New_York
+    networks:
+      - dsa-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs
       - ../reports:/app/reports
       - ../.env:/app/.env
       - ../strategies:/app/strategies:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     logging:
       driver: "json-file"
       options:
@@ -81,3 +90,7 @@ services:
           memory: 1G
         reservations:
           memory: 256M
+
+networks:
+  dsa-net:
+    external: true

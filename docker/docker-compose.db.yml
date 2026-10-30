@@ -1,0 +1,51 @@
+# Standalone PostgreSQL for daily-stock-analysis.
+#
+#   docker network create dsa-net        # 只需执行一次
+#   docker compose -f docker/docker-compose.db.yml up -d
+#
+# 与应用栈（docker/docker-compose.server.yml）分离：数据库有自己的生命周期，
+# 升级应用镜像、重建容器都不影响数据。
+#
+# - 凭据来自 ../.env 的 POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD
+# - 不发布 5432，只有加入 dsa-net 网络的容器能连（网络别名 db）
+# - 数据在 docker volume dsa-pgdata，备份/恢复见 docs/DEPLOY.md
+name: dsa-db
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: stock-db
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    networks:
+      dsa-net:
+        aliases:
+          - db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+volumes:
+  pgdata:
+    name: dsa-pgdata
+
+networks:
+  dsa-net:
+    external: true

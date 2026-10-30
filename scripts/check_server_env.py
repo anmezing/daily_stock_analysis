@@ -5,9 +5,9 @@
 避免启动容器后才发现连不上数据库或缺 LLM Key。
 
 用法：
-    python scripts/check_server_env.py                     # 读 ./.env，按容器访问宿主机判断
+    python scripts/check_server_env.py                     # 读 ./.env，按 compose 内置 db 检查
     python scripts/check_server_env.py --env /opt/stock-analysis/.env
-    python scripts/check_server_env.py --host              # 直接跑在宿主机（非 Docker）时用这个
+    python scripts/check_server_env.py --host              # 应用直接跑在宿主机（非 Docker）时用这个
     python scripts/check_server_env.py --strict            # 把 warning 也当作失败
 
 退出码：0 无 error；1 存在 error（或 --strict 下存在 warning）。
@@ -24,6 +24,7 @@ import stat
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -175,16 +176,50 @@ def split_list(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def parse_db_url(url: str) -> Tuple[str, str, str]:
+    """从 SQLAlchemy URL 里取 (host, password, database)，取不到就返回空串。"""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "", "", ""
+    host = (parts.hostname or "").lower()
+    password = unquote(parts.password) if parts.password else ""
+    database = (parts.path or "").lstrip("/")
+    return host, password, database
+
+
 def check_database(values: Dict[str, str], report: Report, docker: bool) -> None:
     url = values.get("DATABASE_URL", "").strip()
-    if not url:
+    compose_db = is_set(values, "POSTGRES_PASSWORD")
+    pg_password = values.get("POSTGRES_PASSWORD", "").strip()
+    pg_db = values.get("POSTGRES_DB", "").strip() or "dsa"
+    expected_url = f"postgresql+psycopg2://{values.get('POSTGRES_USER', '').strip() or 'dsa'}:<POSTGRES_PASSWORD>@db:5432/{pg_db}"
+
+    if compose_db and is_placeholder(pg_password):
         report.add(
             "ERROR",
-            "DATABASE_URL",
-            "未配置",
-            "容器部署请填 postgresql+psycopg2://user:pass@host.docker.internal:5432/dbname；不填会退回本地 SQLite。",
+            "POSTGRES_PASSWORD",
+            "还是模板占位符",
+            "生成一个：openssl rand -hex 16，然后同步改 DATABASE_URL 里的密码。",
         )
+
+    if not url:
+        if compose_db:
+            report.add(
+                "ERROR",
+                "DATABASE_URL",
+                "未配置（compose 里的 db 服务已启用）",
+                f"填 {expected_url}；不填会退回本地 SQLite，db 容器就白起了。",
+            )
+        else:
+            report.add(
+                "ERROR",
+                "DATABASE_URL",
+                "未配置",
+                "容器部署请填 postgresql+psycopg2://user:pass@db:5432/dbname；不填会退回本地 SQLite。",
+            )
         return
+
     lower = url.lower()
     if lower.startswith("postgres://"):
         report.add("ERROR", "DATABASE_URL", "使用了 SQLAlchemy 不支持的 postgres:// 前缀", "改成 postgresql+psycopg2:// 开头。")
@@ -199,6 +234,49 @@ def check_database(values: Dict[str, str], report: Report, docker: bool) -> None
             "仍然指向 Supabase",
             "迁移到服务器后应改成服务器本机 PostgreSQL；Supabase 数据需要单独导入。",
         )
+
+    host, password, database = parse_db_url(url)
+
+    if compose_db:
+        if host and host != "db":
+            report.add(
+                "WARN",
+                "DATABASE_URL",
+                f"主机名是 {host}，compose 里的 db 服务没被用上",
+                "改成 @db:5432 使用容器内 PostgreSQL；确实要用宿主机库时，把 compose 的 db 服务删掉或停掉。",
+            )
+        if pg_password and password and not is_placeholder(pg_password) and password != pg_password:
+            report.add(
+                "ERROR",
+                "DATABASE_URL",
+                "密码与 POSTGRES_PASSWORD 不一致",
+                "db 容器按 POSTGRES_PASSWORD 初始化，两处必须完全一致。",
+            )
+        if database and database != pg_db:
+            report.add(
+                "WARN",
+                "DATABASE_URL",
+                f"库名 {database} 与 POSTGRES_DB={pg_db} 不一致",
+                "首次初始化只会创建 POSTGRES_DB 指定的库。",
+            )
+        if host == "db":
+            report.add(
+                "INFO",
+                "DATABASE_URL",
+                "使用独立 db 容器（dsa-net 网络别名 db）",
+                "先 `docker network create dsa-net` 再起 docker/docker-compose.db.yml；备份见 docs/DEPLOY.md。",
+            )
+        return
+
+    if host == "db":
+        report.add(
+            "ERROR",
+            "DATABASE_URL",
+            "主机名 db 只在 compose 网络内可解析，且未设置 POSTGRES_PASSWORD",
+            "改用 compose 内置 db（补 POSTGRES_PASSWORD），或换成 host.docker.internal / 127.0.0.1。",
+        )
+        return
+
     if docker:
         if re.search(r"@(?:127\.0\.0\.1|localhost)[:/]", url):
             report.add(
@@ -578,7 +656,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         path = (Path.cwd() / path).resolve()
     print("== 服务器 .env 检查 ==")
     print(f"文件：{path}")
-    print(f"场景：{'宿主机直跑' if args.host else 'Docker Compose（容器访问宿主机）'}")
+    print(f"场景：{'宿主机直跑' if args.host else 'Docker Compose（db + server + analyzer）'}")
     if not path.exists():
         print(f"\n[错误] 文件不存在：{path}")
         print("         -> 先执行：cp docker/env.server.example .env")
@@ -602,7 +680,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     check_template_coverage(values, active_template_keys, report)
 
     # 不打印任何值，只打印“有没有填”
-    for key in ("DATABASE_URL", "GEMINI_API_KEY", "GEMINI_API_KEYS", "FINNHUB_API_KEY", "TWELVEDATA_API_KEY", "TAVILY_API_KEYS"):
+    for key in ("DATABASE_URL", "POSTGRES_PASSWORD", "GEMINI_API_KEY", "GEMINI_API_KEYS", "FINNHUB_API_KEY", "TWELVEDATA_API_KEY", "TAVILY_API_KEYS"):
         if key in values:
             print(f"  {key} = {describe(values[key])}")
     print()

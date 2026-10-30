@@ -494,34 +494,90 @@ A: 每次运行约 2-5 分钟，一个月 22 个工作日 = 44-110 分钟，远�
 
 ---
 
-## 公网服务器 + 域名 + 本机 PostgreSQL
+## 公网服务器 + 域名 + PostgreSQL
 
-适合已经有公网 IP、域名和 PostgreSQL 的服务器。Docker 只跑应用，数据库留在宿主机。
+适合已经有公网 IP、域名的服务器。数据库与应用分成两个 compose 栈，互不影响升级与重建。
 
 ### 1. 架构约定
 
 ```
 Internet → Caddy :443（自动 HTTPS）→ 127.0.0.1:8000（server 容器）
-                                     ↕
-                          宿主机 PostgreSQL :5432
+                                      ↕ 外部网络 dsa-net（不发布任何数据库端口）
+                             db 容器（postgres:16-alpine，volume dsa-pgdata）
 analyzer 容器：按计划执行分析（与 server 共用同一个库）
 ```
 
 - `server` 只绑定 `127.0.0.1:8000`，不直接暴露公网；
-- `analyzer` 与 `server` 共用 `.env` 和数据库；
+- `db` 在 `docker/docker-compose.db.yml` 里单独运行，不发布 5432，只有 `dsa-net` 网络内的容器能连；
+- 应用栈 `docker/docker-compose.server.yml` 只包含 `server` + `analyzer`；
 - **不要同时保留 GitHub Actions 的定时任务**，否则同一批股票会被分析两次。
 
 ### 2. 准备数据库
+
+一次性创建共享网络，然后启动数据库栈：
+
+```bash
+docker network create dsa-net
+docker compose -f docker/docker-compose.db.yml up -d
+docker compose -f docker/docker-compose.db.yml logs -f db   # 等 "ready to accept connections"
+```
+
+首次启动按 `.env` 里的 `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` 初始化：
+
+```dotenv
+POSTGRES_DB=dsa
+POSTGRES_USER=dsa
+POSTGRES_PASSWORD=生成一个
+DATABASE_URL=postgresql+psycopg2://dsa:生成一个@db:5432/dsa
+```
+
+密码生成与一致性：**`DATABASE_URL` 里的密码必须和 `POSTGRES_PASSWORD` 完全一致**，`python scripts/check_server_env.py` 会校验。建议只用十六进制字符，避免 `@ : / # ?` 在 URL 里需要转义：
+
+```bash
+openssl rand -hex 16
+```
+
+备份与恢复（数据在 docker volume `dsa-pgdata`）：
+
+```bash
+# 备份
+docker compose -f docker/docker-compose.db.yml exec -T db \
+  pg_dump -U dsa dsa | gzip > dsa-$(date +%F).sql.gz
+
+# 恢复
+gunzip -c dsa-2026-10-30.sql.gz | docker compose -f docker/docker-compose.db.yml exec -T db \
+  psql -U dsa -d dsa
+```
+
+单独升级数据库镜像（不影响应用栈）：
+
+```bash
+docker compose -f docker/docker-compose.db.yml pull
+docker compose -f docker/docker-compose.db.yml up -d
+```
+
+#### 改成使用宿主机 PostgreSQL（可选）
+
+不需要 `docker-compose.db.yml`，把 `.env` 的 `DATABASE_URL` 主机名换成 `host.docker.internal`：
+
+```bash
+docker compose -f docker/docker-compose.server.yml up -d --build
+```
+
+宿主机需要：
 
 ```sql
 CREATE USER dsa WITH PASSWORD '换成强密码';
 CREATE DATABASE dsa OWNER dsa;
 ```
 
-宿主机 `pg_hba.conf` 允许 Docker 网段连接（按实际网段调整）：
-
-```
-host    dsa    dsa    172.16.0.0/12    scram-sha-256
+```bash
+# 允许容器通过 Docker 网桥连接
+CONF=$(sudo -u postgres psql -tAc "SHOW config_file")
+HBA=$(sudo -u postgres psql -tAc "SHOW hba_file")
+sudo sed -i "s/^#\?listen_addresses.*/listen_addresses = '*'/" "$CONF"
+echo "host    dsa    dsa    172.16.0.0/12    scram-sha-256" | sudo tee -a "$HBA"
+sudo systemctl restart postgresql
 ```
 
 容器通过 `extra_hosts: host.docker.internal:host-gateway` 访问宿主机；不要把 5432 暴露到公网。
@@ -549,7 +605,7 @@ chmod 600 .env
 
 | Actions Secret / Variable | 服务器 `.env` | 说明 |
 |---|---|---|
-| `DATABASE_URL` | `DATABASE_URL` | 改成服务器本机 PostgreSQL，不再用 Supabase |
+| `DATABASE_URL` | `DATABASE_URL` | 改成 `@db:5432`（compose 内置库），不再用 Supabase |
 | `GEMINI_API_KEYS` | `GEMINI_API_KEYS` | 多个 Key 逗号分隔；单个也可用 `GEMINI_API_KEY` |
 | `GEMINI_MODEL` / `GEMINI_MODEL_FALLBACK` | `LITELLM_MODEL` / `LITELLM_FALLBACK_MODELS` | 服务器统一用 `LITELLM_*`，避免两套模型配置 |
 | `FINNHUB_API_KEY` / `TWELVEDATA_API_KEY` / `TAVILY_API_KEYS` / `BRAVE_API_KEYS` / `SERPAPI_API_KEYS` | 同名 | 直接复制 |
@@ -592,14 +648,19 @@ python scripts/check_server_env.py --strict   # 警告也算失败，适合放�
 ```bash
 git clone <your-repo-url> /opt/stock-analysis
 cd /opt/stock-analysis
-cp .env.example .env && vim .env
+cp docker/env.server.example .env && vim .env
 
+# 1) 先起数据库栈（只需一次 network 创建）
+docker network create dsa-net
+docker compose -f docker/docker-compose.db.yml up -d
+
+# 2) 再起应用栈
 docker compose -f docker/docker-compose.server.yml up -d --build
 docker compose -f docker/docker-compose.server.yml ps
 docker compose -f docker/docker-compose.server.yml logs -f server
 ```
 
-`docker/docker-compose.server.yml` 会同时启动 `server` 和 `analyzer`。
+`docker/docker-compose.server.yml` 只启动 `server` 和 `analyzer`；`db` 由 `docker/docker-compose.db.yml` 单独管理。
 
 ### 5. 域名 + HTTPS（Caddy）
 

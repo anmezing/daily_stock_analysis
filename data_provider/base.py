@@ -841,9 +841,11 @@ class DataFetcherManager:
         except Exception as _tf_exc:
             logger.debug("[DataFetcherManager] TickFlowFetcher 初始化跳过: %s", _tf_exc)
 
-        # 构建优先级说明
+        # 构建优先级说明：完整列表只放 DEBUG，INFO 只报数量。
+        # 纯美股/港股部署时，info 里列出 Efinance/Tushare/Pytdx 这些 A 股源会误导排查。
         priority_info = ", ".join([f"{f.name}(P{f.priority})" for f in self._fetchers])
-        logger.info(f"已初始化 {len(self._fetchers)} 个数据源（按优先级）: {priority_info}")
+        logger.info("已初始化 %d 个数据源（各市场实际链路见 [数据源链路] 日志）", len(self._fetchers))
+        logger.debug("数据源优先级（全部）: %s", priority_info)
 
         # 明确打印 TwelveData 可用状态，便于排查配置问题
         twelvedata_fetcher = next((f for f in self._fetchers if f.name == "TwelveDataFetcher"), None)

@@ -58,10 +58,8 @@ class IBKRFetcher(BaseFetcher):
             self._util = util
             self._available = True
         except ImportError:
-            logger.warning(
-                "[IBKRFetcher] ib_insync 未安装，IBKR 数据源不可用\n"
-                "安装方法: pip install ib_insync"
-            )
+            # IBKR 需要本地 TWS/Gateway + 可选依赖，未安装属于正常情况
+            logger.debug("[IBKRFetcher] ib_insync 未安装，IBKR 数据源不参与链路")
             self._available = False
 
     def _ensure_connection(self) -> bool:

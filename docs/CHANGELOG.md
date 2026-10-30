@@ -164,6 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [改进] LLM 路由记住模型健康状态：404 / `no longer available` 的模型在本进程内直接跳过；免费档每日配额打满后暂停 30 分钟内的所有 LLM 调用并快速失败，不再对剩余股票逐个重试三个模型。
 - [改进] 单个模型日配额打满时只把该模型移出候选（30 分钟），同一次调用继续尝试配额独立的 fallback，不再整轮停摆。
 - [改进] 默认模型改为按免费档 RPD 选型：Gemini 3 Flash / 3.8 Flash 免费档仅 20 次/天，`*-flash-lite`（3.1/3.5）为 500 次/天；`GEMINI_MODEL_FALLBACK` 默认值与服务器模板改用 `gemini-3.5-flash-lite`，模板主模型同步调整并注明质量/配额取舍。
+- [改进] `AGENT_SKILLS` 陷阱提示：填写具体策略会自动启用 Agent 链（即使 `AGENT_MODE=false`），现在配置校验会在启动时明确提示；`.env.example` 与服务器模板补充了 Agent 单/多架构的调用量对比、策略清单与"标准链需清空 AGENT_SKILLS"的说明。
+- [改进] 启动日志不再为"没配置的可选数据源"报警：Tushare（仅 A 股）未配置 Token、IBKR 未装 `ib_insync` 只记 DEBUG；`Config.validate()` 也只在自选股/复盘范围确实包含 A 股时才提示 Tushare。"已初始化 N 个数据源"不再把 Efinance/Tushare/Pytdx 等 A 股源列在 INFO 里（完整优先级列表移到 DEBUG）。
 - [修复] TwelveData 命中 429 后进入 60 秒账号级冷却并交给下一个数据源；Finnhub `/stock/candle` 首次返回 403（免费档不含日线接口）后本进程不再尝试，不再每只美股都白跑一次。
 - [改进] 不可用的数据源不再进入链路：冷却中的 TwelveData、日线被判付费专属的 Finnhub 会在组装链路时被跳过（Finnhub 实时报价仍然保留），日志从"尝试/失败/切换"三连降级为一条 DEBUG，不再把可预期的跳过打印成 ERROR。
 - [改进] 美股/港股股票名称解析改为沿用实时行情链路（美股 Finnhub `/search` 优先），不再用 TwelveData 逐只查名称；TwelveData 免费档只有 8 credits/分钟，14 只股票光取名就会把额度耗掉。港股链路仍保留 Akshare 作为最后兜底。

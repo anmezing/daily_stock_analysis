@@ -161,7 +161,8 @@ class TushareFetcher(BaseFetcher):
         config = get_config()
 
         if not config.tushare_token:
-            logger.warning("Tushare Token 未配置，此数据源不可用")
+            # Tushare 是可选数据源，未配置属于正常情况（纯美股/港股部署根本用不到它）
+            logger.debug("Tushare Token 未配置，此数据源不参与链路")
             return
 
         try:

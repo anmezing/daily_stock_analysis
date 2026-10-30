@@ -1949,11 +1949,30 @@ class Config:
             ))
 
         # --- Data sources (informational only) ---
-        if not self.tushare_token:
+        # Tushare 只覆盖 A 股。纯美股/港股部署（服务器 analyzer 就是）不需要它，
+        # 每次启动都提示"未配置 Tushare"只会制造噪音，所以按自选股市场决定是否提示。
+        if not self.tushare_token and self._needs_cn_data_sources():
             issues.append(ConfigIssue(
                 severity="info",
                 message="未配置 Tushare Token，将使用其他数据源",
                 field="TUSHARE_TOKEN",
+            ))
+
+        # --- Agent pipeline mode ---
+        # 配置了具体 skills 时，标准分析链会自动切到 Agent 链（更慢、更耗额度）。
+        # 用户以为关掉 AGENT_MODE 就能走标准链，这里显式提示一次。
+        if (
+            not self.agent_mode
+            and self.agent_skills
+            and self.agent_skills != ["all"]
+        ):
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "已配置 AGENT_SKILLS 但 AGENT_MODE=false：配置了具体策略时"
+                    "会自动启用 Agent 模式（更慢、更耗额度）。想走标准分析链请清空 AGENT_SKILLS。"
+                ),
+                field="AGENT_SKILLS",
             ))
 
         # --- LLM availability ---
@@ -2124,6 +2143,22 @@ class Config:
                 ))
 
         return issues
+
+    def _needs_cn_data_sources(self) -> bool:
+        """当前自选股/复盘范围是否需要 A 股专用数据源（Tushare 等）。"""
+        for code in (self.stock_list or []):
+            text = str(code).strip().upper()
+            base = text.split(".")[0]
+            if base.isdigit() and len(base) == 6:
+                return True
+
+        region = str(getattr(self, "market_review_region", "") or "").lower()
+        parts = [
+            part.strip()
+            for part in region.replace("/", "+").replace(",", "+").split("+")
+            if part.strip()
+        ]
+        return "cn" in parts
 
     def validate(self) -> List[str]:
         """Return validation messages as plain strings (backward-compatible).

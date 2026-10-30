@@ -740,6 +740,35 @@ def _build_schedule_time_provider(default_schedule_time: str):
     return _provider
 
 
+def _resolve_web_server_mode(config: Config, args: argparse.Namespace) -> Tuple[bool, str]:
+    """决定是否启动 Web 服务。
+
+    返回 ``(是否启动, 原因)``，原因取值：
+    - ``explicit``：命令行显式 ``--serve`` / ``--serve-only``
+    - ``disabled``：``WEBUI_ENABLED`` 未开启
+    - ``schedule``：定时任务模式（``--schedule`` 或 ``SCHEDULE_ENABLED=true``）
+    - ``one_shot``：带 ``--stocks`` / ``--dry-run`` / ``--market-review`` / ``--backtest``
+    - ``webui_enabled``：由 ``WEBUI_ENABLED=true`` 隐式开启
+
+    后三种"忽略 WEBUI_ENABLED"的判断是为了避免在服务器分容器部署时，
+    ``analyzer`` 容器或一次性命令被劫持成"只起 Web 服务、不跑分析"。
+    """
+    if getattr(args, "serve", False) or getattr(args, "serve_only", False):
+        return True, "explicit"
+    if not getattr(config, "webui_enabled", False):
+        return False, "disabled"
+    if getattr(args, "schedule", False) or getattr(config, "schedule_enabled", False):
+        return False, "schedule"
+    if (
+        getattr(args, "stocks", None)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "market_review", False)
+        or getattr(args, "backtest", False)
+    ):
+        return False, "one_shot"
+    return True, "webui_enabled"
+
+
 def main() -> int:
     """
     主入口函数
@@ -798,8 +827,23 @@ def main() -> int:
     if args.webui_only:
         args.serve_only = True
 
-    # 兼容旧版 WEBUI_ENABLED 环境变量
-    if config.webui_enabled and not (args.serve or args.serve_only):
+    # 显式给了一次性执行参数（--stocks / --dry-run / --market-review / --backtest）
+    one_shot_requested = bool(
+        getattr(args, "stocks", None)
+        or getattr(args, "dry_run", False)
+        or getattr(args, "market_review", False)
+        or getattr(args, "backtest", False)
+    )
+
+    # 兼容旧版 WEBUI_ENABLED 环境变量：
+    # - 定时任务容器（--schedule）不需要再起一份 Web 服务
+    # - 带一次性参数的命令也不该被劫持成"只起服务不分析"
+    serve_enabled, serve_reason = _resolve_web_server_mode(config, args)
+    if serve_reason == "schedule":
+        logger.info("定时任务模式：忽略 WEBUI_ENABLED=true，不启动 Web 服务（Web 由 server 容器负责）")
+    elif serve_reason == "one_shot":
+        logger.info("一次性执行参数：忽略 WEBUI_ENABLED=true，不启动 Web 服务（需要时显式加 --serve）")
+    elif serve_reason == "webui_enabled":
         args.serve = True
 
     # === 启动 Web 服务 (如果启用) ===
@@ -973,7 +1017,8 @@ def main() -> int:
             return 0
 
         # 模式3: 正常单次运行
-        if config.run_immediately:
+        # 显式给了一次性参数（--stocks 等）时必须执行，不受 RUN_IMMEDIATELY 影响
+        if config.run_immediately or one_shot_requested:
             run_full_analysis(config, args, stock_codes)
         else:
             logger.info("配置为不立即运行分析 (RUN_IMMEDIATELY=false)")

@@ -146,6 +146,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `YfinanceFetcher` 的美股/港股实时行情不再把 `pe_ratio` / `pb_ratio` 固定为 `None`，改为复用已获取的 `ticker.info`（`trailingPE` / `priceToBook`）填充估值字段，不额外发请求；0、负数、NaN、inf 视为无数据。
 - [测试] `tests/conftest.py` 增加数据库隔离：强制测试使用临时 SQLite 并屏蔽 `.env` 中的 `DATABASE_URL`，避免本地跑测试误写线上 PostgreSQL/Supabase；同时移除 `test_tushare_fetcher_get_stock_list` 在导入期加载项目 `.env` 的副作用。
 - [测试] 修复 6 条长期失败用例：`test_report_integrity` 补齐 `ideal_buy`/`secondary_buy` 并新增买点相同必须失败的用例；`test_market_analyzer_generate_text` stub 全局限流器，避免限流 sleep 打断重试退避断言；`test_search_news_freshness` 改用可耗尽队列 side_effect，兼容搜索引擎回退触发的额外查询。
+- [修复] `DatabaseManager.get_instance()` 在首次初始化失败（数据库尚未就绪、密码刚改完）时会留下 `_initialized=False` 的坏单例，之后所有请求都报“DatabaseManager 未正确初始化”，数据库恢复也只能重启进程；现在未初始化时会重新初始化。
+- [修复] `/api/health` 与 `/api/v1/health` 现在会执行 `SELECT 1` 探活数据库，失败返回 503 且 `status=degraded`；同时移除 Dockerfile 健康检查里 `|| python -c "exit(0)"` 的永远成功兜底，`analyzer` 容器则显式 `healthcheck.disable`，避免被误标 unhealthy。
+- [修复] `main.py` 的 `--stocks` / `--dry-run` / `--market-review` / `--backtest` 不再被 `WEBUI_ENABLED=true` 劫持成“只起 Web 服务、不执行分析”；`--schedule` 模式也不会再在容器内额外启动一份 Web 服务。
 - [修复] `src/services/system_config_service.py` 的 f-string 在字符串内部使用同名双引号，导致 Python 3.11（Docker 镜像与 CI 版本）直接 `SyntaxError`、Web/API 无法导入；改为单引号，恢复 3.11 兼容。
 - [修复] `MARKET_REVIEW_REGION` 支持显式组合 `cn+hk` / `cn+us` / `hk+us`，并兼容 `us/hk`、`us,hk` 等写法；此前这类值被配置层判为非法并回退 `cn`，而下游复盘逻辑本身已支持组合。
 - [新功能] 新增 `scripts/check_server_env.py`：部署前只读校验服务器 `.env`，覆盖数据库地址/占位符/容器网络、LLM Key 与模型配置冲突、`SCHEDULE_ENABLED` 分容器语义、自选股市场混用、并发与延迟、认证开关、重复键与未知键，并列出模板中尚未填写的键；不打印密钥原文。

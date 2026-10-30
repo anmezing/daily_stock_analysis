@@ -43,6 +43,7 @@ from sqlalchemy import (
     event,
     func,
     inspect,
+    text,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import (
@@ -824,9 +825,17 @@ class DatabaseManager:
     
     @classmethod
     def get_instance(cls) -> 'DatabaseManager':
-        """获取单例实例"""
+        """获取单例实例。
+
+        首次初始化可能因为数据库尚未就绪（容器启动顺序、密码刚改完）而失败。
+        此前的实现会留下一个 ``_initialized=False`` 的单例，之后所有请求都
+        报“DatabaseManager 未正确初始化”，即使数据库已经恢复也只能重启进程。
+        这里在未初始化时重试一次初始化，让数据库恢复后能自动可用。
+        """
         if cls._instance is None:
             cls._instance = cls()
+        elif not getattr(cls._instance, '_initialized', False):
+            cls._instance.__init__()
         return cls._instance
     
     @classmethod
@@ -2338,6 +2347,22 @@ class DatabaseManager:
 def get_db() -> DatabaseManager:
     """获取数据库管理器实例的快捷方式"""
     return DatabaseManager.get_instance()
+
+
+def check_database_connection() -> Tuple[bool, str]:
+    """探测数据库连通性，供健康检查使用。
+
+    不抛异常：返回 ``(是否可用, 错误描述)``。数据库未初始化或连接失败时，
+    ``DatabaseManager.get_instance()`` 会尝试重新初始化，因此数据库恢复后
+    下一次探测即可转为成功，不需要重启进程。
+    """
+    try:
+        db = DatabaseManager.get_instance()
+        with db.get_session() as session:
+            session.execute(text("SELECT 1"))
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 - 健康检查需要吞掉所有异常
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def persist_llm_usage(

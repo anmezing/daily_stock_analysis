@@ -70,9 +70,11 @@ EXPOSE 8000
 VOLUME ["/app/data", "/app/logs", "/app/reports"]
 
 # 健康检查（FastAPI 模式）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || curl -f http://localhost:8000/health \
-    || python -c "import sys; sys.exit(0)"
+# 注意：/api/health 现在会探测数据库，库不可用时返回 503，容器会被标记为 unhealthy。
+# 不要加 "|| exit 0" 之类的兜底，否则健康检查永远成功，等于没有。
+# 不提供 HTTP 服务的容器（analyzer）请在 compose 里用 healthcheck.disable=true。
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -fsS http://localhost:8000/api/health || exit 1
 
 # 默认命令（可被覆盖）
 CMD ["python", "main.py", "--schedule"]

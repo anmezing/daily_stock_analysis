@@ -73,6 +73,9 @@ services:
       - dsa-net
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # analyzer 不提供 HTTP 服务，忽略镜像内置健康检查，避免被误标为 unhealthy
+    healthcheck:
+      disable: true
     volumes:
       - ../data:/app/data
       - ../logs:/app/logs

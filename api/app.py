@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -32,6 +33,7 @@ from api.middlewares.auth import add_auth_middleware
 from api.middlewares.error_handler import add_error_handlers
 from api.v1.schemas.common import HealthResponse
 from src.services.system_config_service import SystemConfigService
+from src.storage import check_database_connection
 
 
 @asynccontextmanager
@@ -164,11 +166,16 @@ def create_app(static_dir: Optional[Path] = None) -> FastAPI:
         description="用于负载均衡器或监控系统检查服务状态"
     )
     async def health_check() -> HealthResponse:
-        """健康检查接口"""
-        return HealthResponse(
-            status="ok",
-            timestamp=datetime.now().isoformat()
+        """健康检查接口（含数据库探测，失败返回 503）"""
+        db_ok, db_error = await run_in_threadpool(check_database_connection)
+        payload = HealthResponse(
+            status="ok" if db_ok else "degraded",
+            timestamp=datetime.now().isoformat(),
+            database="ok" if db_ok else db_error,
         )
+        if db_ok:
+            return payload
+        return JSONResponse(status_code=503, content=payload.model_dump())
     
     # ============================================================
     # 静态文件托管（前端 SPA）

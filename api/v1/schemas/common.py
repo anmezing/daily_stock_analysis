@@ -31,15 +31,17 @@ class RootResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """健康检查响应"""
-    
-    status: str = Field(..., description="服务状态", example="ok")
+
+    status: str = Field(..., description="服务状态：ok / degraded", example="ok")
     timestamp: Optional[str] = Field(None, description="时间戳")
-    
+    database: Optional[str] = Field(None, description="数据库连通性：ok / error 描述")
+
     class Config:
         json_schema_extra = {
             "example": {
                 "status": "ok",
-                "timestamp": "2024-01-01T12:00:00"
+                "timestamp": "2024-01-01T12:00:00",
+                "database": "ok",
             }
         }
 

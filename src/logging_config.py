@@ -99,7 +99,12 @@ def _silence_existing_litellm_loggers() -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
 
 
-IGNORED_WARNING_MARKERS = ('inplace keyword', 'PDEP-8')
+IGNORED_WARNING_MARKERS = (
+    "inplace keyword",
+    "PDEP-8",
+    # LiteLLM Router 自己的 async 回调 bug，与我们无关，且会在每次冷却时重复刷屏
+    "was never awaited",
+)
 
 
 def _should_ignore_warning(message: object) -> bool:

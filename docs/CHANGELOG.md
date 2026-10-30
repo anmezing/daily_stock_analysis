@@ -158,6 +158,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 新增 `scripts/check_server_env.py`：部署前只读校验服务器 `.env`，覆盖数据库地址/占位符/容器网络、LLM Key 与模型配置冲突、`SCHEDULE_ENABLED` 分容器语义、自选股市场混用、并发与延迟、认证开关、重复键与未知键，并列出模板中尚未填写的键；不打印密钥原文。
 - [改进] PostgreSQL 拆成独立栈 `docker/docker-compose.db.yml`（postgres:16-alpine、volume `dsa-pgdata`、不发布 5432），应用栈 `docker/docker-compose.server.yml` 只保留 `server` + `analyzer`，两者通过外部网络 `dsa-net` 互通；宿主机不再需要安装或放行 PostgreSQL，仍可用 `host.docker.internal` 切回宿主机数据库。
 - [修复] `analyzer` 容器里裸跑 `python main.py` 会被共享 `.env` 的 `WEBUI_ENABLED=true` 隐式拉成 Web/API 服务，且 `RUN_IMMEDIATELY=false` 让它连分析都不跑、只空转；现在 compose 给 `analyzer` 显式设置 `WEBUI_ENABLED=false`，且没有启动 Web 服务的进程不再受 `RUN_IMMEDIATELY=false` 影响，一次性命令照常执行分析。
+- [修复] 美股长公司名（如 `Taiwan Semiconductor Manufacturing Company Ltd. ADR`，51 字符）超过 `analysis_history.name` / `news_intel.name` 的 `VARCHAR(50)`，PostgreSQL 抛 `StringDataRightTruncation` 后整条分析记录被丢弃；现在 `name` 列扩到 128，启动时自动迁移旧库列宽，并在写入前按列宽截断 `name` / `title` / `url` / `query` 等不可控字段。
+- [修复] Agent 工具 `search_comprehensive_intel` 给 `format_intel_report()` 传了不存在的 `stock_code` 参数，导致该工具每次都报 `unexpected keyword argument`、只能退回逐个搜索工具；现在按真实函数签名调用。
+- [修复] LLM 全部失败（免费档日配额打满、fallback 模型被下线）时，Agent 链与标准链都不再把"评分 50 / 观望 / 未知"的占位结果写进 `analysis_history`，避免污染 Web 历史与回测/学习样本；失败原因改为 ERROR 级日志逐只列出。
+- [改进] LLM 路由记住模型健康状态：404 / `no longer available` 的模型在本进程内直接跳过；免费档每日配额打满后暂停 30 分钟内的所有 LLM 调用并快速失败，不再对剩余股票逐个重试三个模型。
+- [修复] TwelveData 命中 429 后进入 60 秒账号级冷却并交给下一个数据源；Finnhub `/stock/candle` 首次返回 403（免费档不含日线接口）后本进程不再尝试，不再每只美股都白跑一次。
+- [修复] 数据源失败日志会把 requests 异常里的完整请求 URL（含 `apikey` / `token`）原样写进日志文件，现在统一打码并截断到 240 字符。
+- [修复] LiteLLM Router 的 `coroutine 'router_cooldown_event_callback' was never awaited` RuntimeWarning 在接管 `showwarning` 后开始刷屏，现一并过滤。
 
 ## [3.11.0] - 2026-03-27
 ## [3.12.0] - 2026-04-01

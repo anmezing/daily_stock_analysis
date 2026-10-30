@@ -31,6 +31,17 @@ def _is_numpy_float(value: Any) -> bool:
     return _np is not None and isinstance(value, _np.floating)
 
 
+def _to_builtin(value: Any) -> Any:
+    """numpy 标量在 json 里不可序列化，统一转成内置类型。"""
+    if _np is None:
+        return value
+    if isinstance(value, _np.integer):
+        return int(value)
+    if isinstance(value, _np.bool_):
+        return bool(value)
+    return value
+
+
 def _is_non_finite_float(value: Any) -> bool:
     if isinstance(value, float):
         return not math.isfinite(value)
@@ -45,6 +56,7 @@ def _sanitize(value: Any, path: str, replaced: List[str]) -> Any:
         return None
     if _is_numpy_float(value):
         return float(value)
+    value = _to_builtin(value)
     if isinstance(value, dict):
         return {
             key: _sanitize(item, f"{path}.{key}" if path else str(key), replaced)

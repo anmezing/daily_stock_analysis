@@ -542,6 +542,17 @@ class LLMToolAdapter:
         """Return unified temperature from config."""
         return self._config.llm_temperature
 
+    @staticmethod
+    def _json_safe_text(value: Any) -> str:
+        """把工具参数/结果转成 JSON 文本，且保证``NaN``/numpy 不会漏进请求体。"""
+        if isinstance(value, str):
+            return value
+        cleaned, _ = sanitize_non_finite(value)
+        try:
+            return json.dumps(cleaned, ensure_ascii=False, default=str, allow_nan=False)
+        except (TypeError, ValueError):
+            return str(cleaned)
+
     def _convert_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Convert internal message format to OpenAI-compatible format for litellm."""
         openai_messages: List[Dict[str, Any]] = []
@@ -550,7 +561,11 @@ class LLMToolAdapter:
                 openai_messages.append({
                     "role": "tool",
                     "tool_call_id": msg.get("tool_call_id", ""),
-                    "content": msg["content"] if isinstance(msg["content"], str) else json.dumps(msg["content"]),
+                    # 工具返回值直接来自 DataFrame，常带 numpy 类型和 NaN；
+                    # json.dumps 默认允许 NaN，会写出 `NaN` 字面量，LiteLLM 在
+                    # 转成 Gemini functionResponse 时又会解析回 float，最终在
+                    # httpx 序列化阶段报 "Out of range float values"。
+                    "content": self._json_safe_text(msg["content"]),
                 })
             elif msg["role"] == "assistant" and msg.get("tool_calls"):
                 openai_tc = []
@@ -560,7 +575,7 @@ class LLMToolAdapter:
                         "type": "function",
                         "function": {
                             "name": tc["name"],
-                            "arguments": json.dumps(tc["arguments"]),
+                            "arguments": self._json_safe_text(tc["arguments"]),
                         },
                     }
                     sig = tc.get("thought_signature")

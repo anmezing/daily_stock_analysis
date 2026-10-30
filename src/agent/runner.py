@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 from src.agent.llm_adapter import LLMToolAdapter
 from src.agent.tools.registry import ToolRegistry
 from src.storage import persist_llm_usage as _persist_usage
+from src.utils.json_sanitize import sanitize_non_finite
 
 logger = logging.getLogger(__name__)
 
@@ -80,20 +81,28 @@ class RunLoopResult:
 # ============================================================
 
 def serialize_tool_result(result: Any) -> str:
-    """Serialize a tool result to a JSON string consumable by an LLM."""
+    """Serialize a tool result to a JSON string consumable by an LLM.
+
+    工具返回值来自 DataFrame，普遍带 numpy 标量和 NaN。``json.dumps`` 默认
+    允许 ``NaN``/``Infinity`` 字面量，LiteLLM 在转成 Gemini ``functionResponse``
+    时会把它们解析回 float，最终让 httpx 在发送前报
+    ``Out of range float values are not JSON compliant``。
+    """
+    result, _ = sanitize_non_finite(result)
     if result is None:
         return json.dumps({"result": None})
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
         try:
-            return json.dumps(result, ensure_ascii=False, default=str)
+            return json.dumps(result, ensure_ascii=False, default=str, allow_nan=False)
         except (TypeError, ValueError):
             return str(result)
     if hasattr(result, "__dict__"):
         try:
             d = {k: v for k, v in result.__dict__.items() if not k.startswith("_")}
-            return json.dumps(d, ensure_ascii=False, default=str)
+            d, _ = sanitize_non_finite(d)
+            return json.dumps(d, ensure_ascii=False, default=str, allow_nan=False)
         except (TypeError, ValueError):
             return str(result)
     return str(result)

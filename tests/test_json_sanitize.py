@@ -83,5 +83,41 @@ class NonFiniteEnvConfigTest(unittest.TestCase):
             self.assertEqual(resolve_unified_llm_temperature("gemini/gemini-3-flash-preview"), 0.2)
 
 
+class ToolResultSerializationTest(unittest.TestCase):
+    def test_serialize_tool_result_replaces_nan_with_null(self) -> None:
+        from src.agent.runner import serialize_tool_result
+
+        payload = {
+            "code": "AAPL",
+            "data": [{"date": "2026-10-28", "close": 268.5, "ma5": float("nan"), "ma10": float("inf")}],
+        }
+
+        text = serialize_tool_result(payload)
+
+        self.assertNotIn("NaN", text)
+        self.assertNotIn("Infinity", text)
+        self.assertIn("null", text)
+        self.assertIn("268.5", text)
+
+    def test_serialize_tool_result_converts_numpy_scalars(self) -> None:
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover
+            self.skipTest("numpy not installed")
+
+        from src.agent.runner import serialize_tool_result
+
+        text = serialize_tool_result({"close": np.float64(1.25), "volume": np.int64(100), "ok": np.bool_(True)})
+
+        self.assertEqual(text, '{"close": 1.25, "volume": 100, "ok": true}')
+
+    def test_adapter_json_safe_text_handles_nan(self) -> None:
+        from src.agent.llm_adapter import LLMToolAdapter
+
+        text = LLMToolAdapter._json_safe_text({"tool": "x", "value": float("nan")})
+
+        self.assertEqual(text, '{"tool": "x", "value": null}')
+
+
 if __name__ == "__main__":
     unittest.main()

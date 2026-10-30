@@ -15,6 +15,7 @@ from threading import Lock
 from typing import Optional
 
 from src.agent.tools.registry import ToolParameter, ToolDefinition
+from src.utils.json_sanitize import sanitize_non_finite
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,8 @@ def _handle_get_daily_history(stock_code: str, days: int = 60) -> dict:
 
     # Convert DataFrame to list of dicts (last N records)
     records = df.tail(min(days, len(df))).to_dict(orient="records")
-    # Ensure date is string
+    # Ensure date is string；NaN / numpy 标量会让 LLM 请求体无法序列化
+    records, _ = sanitize_non_finite(records)
     for r in records:
         if "date" in r:
             r["date"] = str(r["date"])

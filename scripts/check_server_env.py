@@ -41,18 +41,22 @@ PLACEHOLDER_TOKENS = (
 
 SECRET_KEY_HINTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "WEBHOOK", "URL", "DSN")
 
-# 通知渠道：(渠道名, 必填键, 至少一组)
+# 通知渠道：(渠道名, 必填键)
+# 只列真正会推送日报的渠道。钉钉 AppKey/AppSecret 只用于 Stream 模式回复对话，
+# 不会推送日报，所以不在这里（见 check_notifications 的单独提示）。
 NOTIFY_CHANNELS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("企业微信", ("WECHAT_WEBHOOK_URL",)),
     ("飞书", ("FEISHU_WEBHOOK_URL",)),
     ("Telegram", ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")),
     ("邮件", ("EMAIL_SENDER", "EMAIL_PASSWORD", "EMAIL_RECEIVERS")),
     ("自定义 Webhook", ("CUSTOM_WEBHOOK_URLS",)),
-    ("钉钉", ("DINGTALK_APP_KEY", "DINGTALK_APP_SECRET")),
     ("Slack", ("SLACK_WEBHOOK_URL",)),
     ("Discord", ("DISCORD_WEBHOOK_URL",)),
     ("PushPlus", ("PUSHPLUS_TOKEN",)),
 )
+
+# DingTalk 应用凭证（仅 Stream 回复，不推送日报）
+DINGTALK_STREAM_KEYS: Tuple[str, ...] = ("DINGTALK_APP_KEY", "DINGTALK_APP_SECRET")
 
 LLM_KEY_GROUPS: Tuple[Tuple[str, ...], ...] = (
     ("GEMINI_API_KEYS", "GEMINI_API_KEY"),
@@ -450,13 +454,26 @@ def check_notifications(values: Dict[str, str], report: Report) -> None:
             partial.append(f"{name}（缺 {', '.join(k for k in keys if k not in filled)}）")
     if ready:
         report.add("INFO", "通知", f"已启用：{', '.join(ready)}", "")
-    else:
+        return
+
+    has_dingtalk = any(is_set(values, key) for key in DINGTALK_STREAM_KEYS)
+    if has_dingtalk:
         report.add(
-            "WARN",
+            "ERROR",
             "通知",
-            "没有任何完整配置的通知渠道" + (f"；不完整：{'; '.join(partial)}" if partial else ""),
-            "至少配一个，否则分析跑完也收不到报告。",
+            "只配置了钉钉 AppKey/AppSecret，它不会推送每日报告",
+            "钉钉应用凭证只用于 Stream 模式回复对话。要用钉钉收日报，把群机器人 webhook 填到 "
+            "CUSTOM_WEBHOOK_URLS=https://oapi.dingtalk.com/robot/send?access_token=...；"
+            "或改配 WECHAT_WEBHOOK_URL / FEISHU_WEBHOOK_URL / TELEGRAM_* / 邮件。",
         )
+        return
+
+    report.add(
+        "WARN",
+        "通知",
+        "没有任何完整配置的通知渠道" + (f"；不完整：{'; '.join(partial)}" if partial else ""),
+        "至少配一个，否则分析跑完也收不到报告。",
+    )
 
 
 def check_search_sources(values: Dict[str, str], report: Report) -> None:

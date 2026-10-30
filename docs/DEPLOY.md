@@ -545,6 +545,26 @@ chmod 600 .env
 - **`REALTIME_SOURCE_PRIORITY`** 只对 A 股生效；美股/港股走各自的优先链，不需要改。
 - **搜索 Key**：失效的 Tavily/Bocha Key 会拖慢整轮分析，服务器上只保留有效的。
 
+#### 从 GitHub Actions 迁移配置
+
+| Actions Secret / Variable | 服务器 `.env` | 说明 |
+|---|---|---|
+| `DATABASE_URL` | `DATABASE_URL` | 改成服务器本机 PostgreSQL，不再用 Supabase |
+| `GEMINI_API_KEYS` | `GEMINI_API_KEYS` | 多个 Key 逗号分隔；单个也可用 `GEMINI_API_KEY` |
+| `GEMINI_MODEL` / `GEMINI_MODEL_FALLBACK` | `LITELLM_MODEL` / `LITELLM_FALLBACK_MODELS` | 服务器统一用 `LITELLM_*`，避免两套模型配置 |
+| `FINNHUB_API_KEY` / `TWELVEDATA_API_KEY` / `TAVILY_API_KEYS` / `BRAVE_API_KEYS` / `SERPAPI_API_KEYS` | 同名 | 直接复制 |
+| `SOCIAL_SENTIMENT_API_KEY` | 同名 | 可选；不用社交情绪可省略 |
+| `TICKFLOW_API_KEY` | 同名 | **只用于 A 股大盘复盘/指数**；纯美股/港股可留空 |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 同名 | 通知渠道，至少配一个 |
+| `STOCK_LIST` / `MAX_WORKERS` / `REPORT_TYPE` | 同名 | `MAX_WORKERS=1` |
+| `MARKET_REVIEW_ENABLED` / `MARKET_REVIEW_REGION` | 同名 | 只做美股/港股设 `us` / `hk` / `all` |
+| `ANALYSIS_DELAY` | `ANALYSIS_DELAY` | Actions 里是 15 秒，服务器建议 0–2 |
+| `TRADING_DAY_CHECK_ENABLED` | 同名 | 保持 `true` |
+| `AGENT_MODE` / `AGENT_ARCH` / `AGENT_SKILLS` | 同名 | Actions 里是 `true/multi`；标准分析链建议先 `AGENT_MODE=false`，见下 |
+
+> **关于 Agent 模式**：`AGENT_MODE=true` 会走多 Agent 编排，和标准分析链是两套提示词/工具路径。  
+> 最近的日期分离、regime、基本面入词、数值校验主要修在标准链；建议服务器先用 `AGENT_MODE=false`，确认分析结果稳定后再决定是否开 Agent。
+
 首次启动会自动 `create_all` 并执行兼容迁移（新增列），不需要手工建表。
 
 ### 4. 启动

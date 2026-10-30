@@ -1017,8 +1017,12 @@ def main() -> int:
             return 0
 
         # 模式3: 正常单次运行
-        # 显式给了一次性参数（--stocks 等）时必须执行，不受 RUN_IMMEDIATELY 影响
-        if config.run_immediately or one_shot_requested:
+        # 判断口径：
+        # - 显式给了一次性参数（--stocks 等）时必须执行，不受 RUN_IMMEDIATELY 影响；
+        # - 没起 Web 服务时，这个进程除了分析没有别的职责，RUN_IMMEDIATELY=false
+        #   不应该让它空转退出（服务器 analyzer 容器里裸跑 `main.py` 就是这种情况）；
+        # - 只有"起 Web 且常驻"时，RUN_IMMEDIATELY=false 才用来跳过启动即分析。
+        if config.run_immediately or one_shot_requested or not start_serve:
             run_full_analysis(config, args, stock_codes)
         else:
             logger.info("配置为不立即运行分析 (RUN_IMMEDIATELY=false)")

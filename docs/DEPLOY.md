@@ -595,6 +595,7 @@ chmod 600 .env
 模板已经包含：数据库、LLM、US/HK 行情与新闻、回测、调度、Web、认证。几个容易踩的坑：
 
 - **`SCHEDULE_ENABLED=false`**：分容器部署时必须保持 false。`server` 容器用 `--serve-only`，`analyzer` 容器用 `--schedule`；设成 true 会让 `server` 也进入定时模式，网页就打不开了。
+- **`RUN_IMMEDIATELY=false`**：只让"起 Web 且常驻"的进程跳过启动即分析。`analyzer` 容器里裸跑 `main.py` 是纯一次性命令，仍会正常执行分析，不会被这个开关静默成空转。
 - **`TZ`**：`.env` 里是服务器时区；`analyzer` 容器在 compose 中固定为 `America/New_York`，所以 `SCHEDULE_TIME=10:00` 就是美股 10:00 ET。
 - **`API_PORT`**：Docker 映射到宿主机的端口；Caddy 反代 `127.0.0.1:8000`。`WEBUI_PORT` 是容器内端口，两者不要混。
 - **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `hk+us` / `all`，不要留默认的 `cn`；组合写法兼容 `us/hk`、`us,hk`。
@@ -661,6 +662,23 @@ docker compose -f docker/docker-compose.server.yml logs -f server
 ```
 
 `docker/docker-compose.server.yml` 只启动 `server` 和 `analyzer`；`db` 由 `docker/docker-compose.db.yml` 单独管理。
+
+#### 手动跑一轮 / 一次性任务
+
+```bash
+# 跑 STOCK_LIST 里的全部自选股，不推送通知
+docker compose -f docker/docker-compose.server.yml run --rm -T \
+  analyzer python main.py --no-notify
+
+# 只跑指定股票
+docker compose -f docker/docker-compose.server.yml run --rm -T \
+  analyzer python main.py --stocks AAPL,0700.HK --no-notify
+```
+
+- `analyzer` 的 compose 环境里显式设了 `WEBUI_ENABLED=false`，裸跑 `main.py` 只做分析，不会额外起一份 Web/API；`server` 容器仍然用 `--serve-only` 提供网页。
+- `-T` 关掉伪终端，避免 `docker compose run` 在非交互环境里缓冲输出；想实时看进度另开一个终端 `tail -f logs/stock_analysis_$(date +%Y%m%d).log`。
+- 不要给这类一次性命令加 `| tail -40`，管道会等到进程结束才显示，看起来像卡住。
+- 容器以 root 写 `reports/`，宿主机普通用户删不掉，清理测试产物时用 `sudo rm -f reports/*.md`。
 
 ### 5. 域名 + HTTPS（Caddy）
 

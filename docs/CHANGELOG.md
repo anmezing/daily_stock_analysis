@@ -157,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `MARKET_REVIEW_REGION` 支持显式组合 `cn+hk` / `cn+us` / `hk+us`，并兼容 `us/hk`、`us,hk` 等写法；此前这类值被配置层判为非法并回退 `cn`，而下游复盘逻辑本身已支持组合。
 - [新功能] 新增 `scripts/check_server_env.py`：部署前只读校验服务器 `.env`，覆盖数据库地址/占位符/容器网络、LLM Key 与模型配置冲突、`SCHEDULE_ENABLED` 分容器语义、自选股市场混用、并发与延迟、认证开关、重复键与未知键，并列出模板中尚未填写的键；不打印密钥原文。
 - [改进] PostgreSQL 拆成独立栈 `docker/docker-compose.db.yml`（postgres:16-alpine、volume `dsa-pgdata`、不发布 5432），应用栈 `docker/docker-compose.server.yml` 只保留 `server` + `analyzer`，两者通过外部网络 `dsa-net` 互通；宿主机不再需要安装或放行 PostgreSQL，仍可用 `host.docker.internal` 切回宿主机数据库。
+- [修复] `analyzer` 容器里裸跑 `python main.py` 会被共享 `.env` 的 `WEBUI_ENABLED=true` 隐式拉成 Web/API 服务，且 `RUN_IMMEDIATELY=false` 让它连分析都不跑、只空转；现在 compose 给 `analyzer` 显式设置 `WEBUI_ENABLED=false`，且没有启动 Web 服务的进程不再受 `RUN_IMMEDIATELY=false` 影响，一次性命令照常执行分析。
 
 ## [3.11.0] - 2026-03-27
 ## [3.12.0] - 2026-04-01

@@ -69,6 +69,9 @@ services:
       # US market schedule: SCHEDULE_TIME is interpreted in this timezone.
       # Set SCHEDULE_TIME=10:00 in .env for 10:00 ET; DST handled by tzdata.
       - TZ=America/New_York
+      # analyzer 只跑分析，绝不能再起一份 Web 服务：.env 里 WEBUI_ENABLED=true
+      # 是给 server 容器用的，这里显式关掉，避免裸跑 `main.py` 被隐式拉成 API 服务。
+      - WEBUI_ENABLED=false
     networks:
       - dsa-net
     extra_hosts:

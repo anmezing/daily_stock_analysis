@@ -528,27 +528,22 @@ host    dsa    dsa    172.16.0.0/12    scram-sha-256
 
 ### 3. 配置 `.env`
 
-```dotenv
-# 服务器本机 PostgreSQL
-DATABASE_URL=postgresql+psycopg2://dsa:密码@host.docker.internal:5432/dsa
-
-STOCK_LIST=AAPL,MSFT,NVDA,0700
-
-LITELLM_MODEL=gemini/gemini-3-flash-preview
-GEMINI_API_KEY=...
-# TAVILY_API_KEYS=...
-# FINNHUB_API_KEY=...
-# ALPHAVANTAGE_API_KEY=...
-
-WEBUI_ENABLED=true
-WEBUI_HOST=0.0.0.0
-ADMIN_AUTH_ENABLED=true
-TZ=Asia/Shanghai
-```
+服务器部署直接用精简模板，避免从 700 行的通用模板里挑：
 
 ```bash
+cp docker/env.server.example .env
+vim .env          # 至少改 DATABASE_URL / GEMINI_API_KEY / STOCK_LIST
 chmod 600 .env
 ```
+
+模板已经包含：数据库、LLM、US/HK 行情与新闻、回测、调度、Web、认证。几个容易踩的坑：
+
+- **`SCHEDULE_ENABLED=false`**：分容器部署时必须保持 false。`server` 容器用 `--serve-only`，`analyzer` 容器用 `--schedule`；设成 true 会让 `server` 也进入定时模式，网页就打不开了。
+- **`TZ`**：`.env` 里是服务器时区；`analyzer` 容器在 compose 中固定为 `America/New_York`，所以 `SCHEDULE_TIME=10:00` 就是美股 10:00 ET。
+- **`API_PORT`**：Docker 映射到宿主机的端口；Caddy 反代 `127.0.0.1:8000`。`WEBUI_PORT` 是容器内端口，两者不要混。
+- **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `all`，不要留默认的 `cn`。
+- **`REALTIME_SOURCE_PRIORITY`** 只对 A 股生效；美股/港股走各自的优先链，不需要改。
+- **搜索 Key**：失效的 Tavily/Bocha Key 会拖慢整轮分析，服务器上只保留有效的。
 
 首次启动会自动 `create_all` 并执行兼容迁移（新增列），不需要手工建表。
 

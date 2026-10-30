@@ -99,21 +99,42 @@ def _silence_existing_litellm_loggers() -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
 
 
+IGNORED_WARNING_MARKERS = ('inplace keyword', 'PDEP-8')
+
+
+def _should_ignore_warning(message: object) -> bool:
+    """行情库的 pandas inplace 弃用警告，对我们没有可操作性。"""
+    text = str(message)
+    return any(marker in text for marker in IGNORED_WARNING_MARKERS)
+
+
 def _configure_third_party_warnings() -> None:
     """压掉行情库触发的 pandas 弃用警告。
 
     yfinance 仍在使用 ``DataFrame.sort_index(inplace=True)`` / ``rename(inplace=True)``
-    这类写法，每次拉行情都会刷屏。注意两点：
-    - pandas 3.x 的 ``Pandas4Warning`` 不保证继承 ``FutureWarning``，所以这里
-      不限定 category（默认 ``Warning`` 能匹配所有子类）；
-    - 同时按"模块"和"消息"各加一条，任一条命中即可。
+    这类写法，每次拉行情都会刷屏。分层处理：
+
+    1. ``filterwarnings`` 按模块/消息忽略（cost 最低）；
+    2. 必须再接管 ``warnings.showwarning``：某些库（pandas/yfinance）在运行期
+       调用 ``simplefilter("always")``，会插到过滤器链最前面并**压过**我们注册的
+       规则，此时只有接管 showwarning 才能拦住；
+    3. ``logging.captureWarnings`` 让警告走日志系统，便于统一格式。
     """
     import warnings
 
     warnings.filterwarnings('ignore', module=r'yfinance(\..*)?')
     warnings.filterwarnings('ignore', message=r'.*inplace keyword.*')
     warnings.filterwarnings('ignore', message=r'.*Pandas4Warning.*')
-    warnings.filterwarnings('ignore', category=FutureWarning, module=r'pandas(\..*)?')
+
+    logging.captureWarnings(True)
+    previous_showwarning = warnings.showwarning
+
+    def _filtered_showwarning(message, category, filename, lineno, file=None, line=None):
+        if _should_ignore_warning(message):
+            return
+        previous_showwarning(message, category, filename, lineno, file=file, line=line)
+
+    warnings.showwarning = _filtered_showwarning
 
 
 def setup_logging(

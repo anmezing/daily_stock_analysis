@@ -66,32 +66,34 @@ class SetupLoggingTest(unittest.TestCase):
 
 
 class ThirdPartyWarningFilterTest(unittest.TestCase):
-    def test_inplace_warning_suppressed_without_futurewarning_inheritance(self) -> None:
-        """pandas 3.x 的 Pandas4Warning 不保证继承 FutureWarning。"""
+    def test_inplace_warning_is_ignored(self) -> None:
+        from src.logging_config import _should_ignore_warning
+
+        self.assertTrue(
+            _should_ignore_warning("The inplace keyword in DataFrame.sort_index is deprecated")
+        )
+        self.assertTrue(_should_ignore_warning("See ...#deprecation-inplace for more details. PDEP-8"))
+
+    def test_unrelated_warning_is_not_ignored(self) -> None:
+        from src.logging_config import _should_ignore_warning
+
+        self.assertFalse(_should_ignore_warning("Another warning"))
+
+    def test_setup_logging_installs_warning_hook(self) -> None:
+        """运行期 simplefilter("always") 会压过 filterwarnings，因此必须接管 showwarning。"""
         import warnings
 
-        from src.logging_config import _configure_third_party_warnings
+        from src.logging_config import setup_logging
 
-        with warnings.catch_warnings(record=True) as caught:
-            _configure_third_party_warnings()
-
-            class Pandas4Warning(UserWarning):
-                pass
-
-            warnings.warn("The inplace keyword in DataFrame.rename is deprecated", Pandas4Warning)
-
-        self.assertEqual(caught, [])
-
-    def test_unrelated_warning_still_visible(self) -> None:
-        import warnings
-
-        from src.logging_config import _configure_third_party_warnings
-
-        with warnings.catch_warnings(record=True) as caught:
-            _configure_third_party_warnings()
-            warnings.warn("something we should still see", UserWarning)
-
-        self.assertEqual(len(caught), 1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cwd = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                setup_logging(log_prefix="w", log_dir=os.path.join(temp_dir, "logs"))
+                self.assertTrue(getattr(warnings.showwarning, "__name__", "") == "_filtered_showwarning")
+            finally:
+                os.chdir(cwd)
+                logging.getLogger().handlers.clear()
 
 
 if __name__ == "__main__":

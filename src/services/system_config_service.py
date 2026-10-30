@@ -664,7 +664,7 @@ class SystemConfigService:
             normalized_names.append(name)
 
         for name in normalized_names:
-            prefix = f"LLM_{name.upper().replace("-", "_")}"
+            prefix = f"LLM_{name.upper().replace('-', '_')}"
             protocol_value = (effective_map.get(f"{prefix}_PROTOCOL") or "").strip()
             base_url_value = (effective_map.get(f"{prefix}_BASE_URL") or "").strip()
             api_key_value = (
@@ -706,7 +706,7 @@ class SystemConfigService:
             if not name:
                 continue
 
-            prefix = f"LLM_{name.upper().replace("-", "_")}"
+            prefix = f"LLM_{name.upper().replace('-', '_')}"
             enabled = parse_env_bool(effective_map.get(f"{prefix}_ENABLED"), default=True)
             if not enabled:
                 continue

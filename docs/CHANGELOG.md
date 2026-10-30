@@ -146,6 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `YfinanceFetcher` 的美股/港股实时行情不再把 `pe_ratio` / `pb_ratio` 固定为 `None`，改为复用已获取的 `ticker.info`（`trailingPE` / `priceToBook`）填充估值字段，不额外发请求；0、负数、NaN、inf 视为无数据。
 - [测试] `tests/conftest.py` 增加数据库隔离：强制测试使用临时 SQLite 并屏蔽 `.env` 中的 `DATABASE_URL`，避免本地跑测试误写线上 PostgreSQL/Supabase；同时移除 `test_tushare_fetcher_get_stock_list` 在导入期加载项目 `.env` 的副作用。
 - [测试] 修复 6 条长期失败用例：`test_report_integrity` 补齐 `ideal_buy`/`secondary_buy` 并新增买点相同必须失败的用例；`test_market_analyzer_generate_text` stub 全局限流器，避免限流 sleep 打断重试退避断言；`test_search_news_freshness` 改用可耗尽队列 side_effect，兼容搜索引擎回退触发的额外查询。
+- [修复] `src/services/system_config_service.py` 的 f-string 在字符串内部使用同名双引号，导致 Python 3.11（Docker 镜像与 CI 版本）直接 `SyntaxError`、Web/API 无法导入；改为单引号，恢复 3.11 兼容。
+- [修复] `MARKET_REVIEW_REGION` 支持显式组合 `cn+hk` / `cn+us` / `hk+us`，并兼容 `us/hk`、`us,hk` 等写法；此前这类值被配置层判为非法并回退 `cn`，而下游复盘逻辑本身已支持组合。
 - [新功能] 新增 `scripts/check_server_env.py`：部署前只读校验服务器 `.env`，覆盖数据库地址/占位符/容器网络、LLM Key 与模型配置冲突、`SCHEDULE_ENABLED` 分容器语义、自选股市场混用、并发与延迟、认证开关、重复键与未知键，并列出模板中尚未填写的键；不打印密钥原文。
 - [改进] PostgreSQL 拆成独立栈 `docker/docker-compose.db.yml`（postgres:16-alpine、volume `dsa-pgdata`、不发布 5432），应用栈 `docker/docker-compose.server.yml` 只保留 `server` + `analyzer`，两者通过外部网络 `dsa-net` 互通；宿主机不再需要安装或放行 PostgreSQL，仍可用 `host.docker.internal` 切回宿主机数据库。
 

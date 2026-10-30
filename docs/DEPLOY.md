@@ -597,7 +597,7 @@ chmod 600 .env
 - **`SCHEDULE_ENABLED=false`**：分容器部署时必须保持 false。`server` 容器用 `--serve-only`，`analyzer` 容器用 `--schedule`；设成 true 会让 `server` 也进入定时模式，网页就打不开了。
 - **`TZ`**：`.env` 里是服务器时区；`analyzer` 容器在 compose 中固定为 `America/New_York`，所以 `SCHEDULE_TIME=10:00` 就是美股 10:00 ET。
 - **`API_PORT`**：Docker 映射到宿主机的端口；Caddy 反代 `127.0.0.1:8000`。`WEBUI_PORT` 是容器内端口，两者不要混。
-- **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `all`，不要留默认的 `cn`。
+- **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `hk+us` / `all`，不要留默认的 `cn`；组合写法兼容 `us/hk`、`us,hk`。
 - **`REALTIME_SOURCE_PRIORITY`** 只对 A 股生效；美股/港股走各自的优先链，不需要改。
 - **搜索 Key**：失效的 Tavily/Bocha Key 会拖慢整轮分析，服务器上只保留有效的。
 
@@ -613,7 +613,7 @@ chmod 600 .env
 | `TICKFLOW_API_KEY` | 同名 | **只用于 A 股大盘复盘/指数**；纯美股/港股可留空 |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 同名 | 通知渠道，至少配一个 |
 | `STOCK_LIST` / `MAX_WORKERS` / `REPORT_TYPE` | 同名 | `MAX_WORKERS=1` |
-| `MARKET_REVIEW_ENABLED` / `MARKET_REVIEW_REGION` | 同名 | 只做美股/港股设 `us` / `hk` / `all` |
+| `MARKET_REVIEW_ENABLED` / `MARKET_REVIEW_REGION` | 同名 | 只做美股/港股设 `us` / `hk` / `hk+us` |
 | `ANALYSIS_DELAY` | `ANALYSIS_DELAY` | Actions 里是 15 秒，服务器建议 0–2 |
 | `TRADING_DAY_CHECK_ENABLED` | 同名 | 保持 `true` |
 | `AGENT_MODE` / `AGENT_ARCH` / `AGENT_SKILLS` | 同名 | Actions 里是 `true/multi`；标准分析链建议先 `AGENT_MODE=false`，见下 |

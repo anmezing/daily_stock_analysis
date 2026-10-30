@@ -386,22 +386,50 @@ def check_stocks(values: Dict[str, str], report: Report) -> None:
         )
 
 
+def normalize_region(value: str) -> str:
+    normalized = value.strip().lower().replace(" ", "")
+    for separator in ("/", ",", ";"):
+        normalized = normalized.replace(separator, "+")
+    return normalized.strip("+")
+
+
+def is_valid_region(value: str) -> bool:
+    normalized = normalize_region(value)
+    if normalized in {"cn", "hk", "us", "both", "all"}:
+        return True
+    parts = {part for part in normalized.split("+") if part}
+    return bool(parts) and parts <= {"cn", "hk", "us"}
+
+
 def check_market_review(values: Dict[str, str], report: Report) -> None:
     region = values.get("MARKET_REVIEW_REGION", "").strip().lower()
     stocks = split_list(values.get("STOCK_LIST", ""))
     has_a_share = any(A_SHARE_PATTERN.fullmatch(code) for code in stocks)
     has_us_hk = any(not A_SHARE_PATTERN.fullmatch(code) for code in stocks)
-    if region and region not in {"us", "hk", "all", "cn"}:
-        report.add("ERROR", "MARKET_REVIEW_REGION", f"非法值：{region}", "可选 us / hk / all / cn。")
-    if region == "cn" and has_us_hk and not has_a_share:
+
+    if region and not is_valid_region(region):
         report.add(
-            "WARN",
+            "ERROR",
             "MARKET_REVIEW_REGION",
-            "自选股只有美股/港股，但大盘复盘是 cn",
-            "改成 us / hk / all，或先 MARKET_REVIEW_ENABLED=false 缩短首轮时间。",
+            f"非法值：{region}",
+            "可选 cn / hk / us / both / all，或组合 cn+hk / cn+us / hk+us（也接受 us/hk 这类写法）。",
         )
+        return
+
     if not is_set(values, "MARKET_REVIEW_REGION") and is_set(values, "MARKET_REVIEW_ENABLED"):
-        report.add("INFO", "MARKET_REVIEW_REGION", "未设置，默认 cn", "只做美股/港股时显式设为 us / hk / all。")
+        report.add("INFO", "MARKET_REVIEW_REGION", "未设置，默认 cn", "只做美股/港股时显式设为 us / hk / hk+us。")
+        return
+
+    if has_us_hk and not has_a_share:
+        if normalize_region(region) == "cn":
+            report.add(
+                "WARN",
+                "MARKET_REVIEW_REGION",
+                "自选股只有美股/港股，但大盘复盘是 cn",
+                "改成 us / hk / hk+us / all，或先 MARKET_REVIEW_ENABLED=false 缩短首轮时间。",
+            )
+        elif region:
+            report.add("INFO", "MARKET_REVIEW_REGION", f"复盘范围 {region}，与自选股一致", "")
 
 
 def check_schedule(values: Dict[str, str], report: Report) -> None:

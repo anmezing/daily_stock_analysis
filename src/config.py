@@ -1725,13 +1725,27 @@ class Config:
 
     @classmethod
     def _parse_market_review_region(cls, value: str) -> str:
-        """解析大盘复盘市场区域，非法值记录警告后回退为 cn"""
+        """解析大盘复盘市场区域，非法值记录警告后回退为 cn。
+
+        支持单市场（cn / hk / us）、预设组合（both = 美股+A股、all = A股+港股+美股），
+        以及显式组合（cn+hk / cn+us / hk+us）。分隔符兼容 ``+``、``/`` 和 ``,``，
+        例如 ``us/hk`` 会被规范化为 ``hk+us``。
+        """
         import logging
-        v = (value or 'cn').strip().lower()
+        raw = (value or 'cn').strip().lower().replace(' ', '')
+        for separator in ('/', ',', ';'):
+            raw = raw.replace(separator, '+')
+        v = raw.strip('+')
         if v in ('cn', 'hk', 'us', 'both', 'all'):
             return v
+
+        parts = {part for part in v.split('+') if part}
+        if parts and parts <= {'cn', 'hk', 'us'}:
+            return '+'.join(market for market in ('cn', 'hk', 'us') if market in parts)
+
         logging.getLogger(__name__).warning(
-            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'（合法值：cn / hk / us / both / all）"
+            f"MARKET_REVIEW_REGION 配置值 '{value}' 无效，已回退为默认值 'cn'"
+            "（合法值：cn / hk / us / both / all / cn+hk / cn+us / hk+us）"
         )
         return 'cn'
 

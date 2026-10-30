@@ -17,13 +17,15 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import List, Optional
 
+from src.utils.log_redact import redact_secrets
+
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(pathname)s:%(lineno)d | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class RelativePathFormatter(logging.Formatter):
-    """自定义 Formatter，输出相对路径而非绝对路径"""
+    """自定义 Formatter，输出相对路径而非绝对路径，并对密钥统一脱敏。"""
 
     def __init__(self, fmt=None, datefmt=None, relative_to=None):
         super().__init__(fmt, datefmt)
@@ -36,7 +38,9 @@ class RelativePathFormatter(logging.Formatter):
         except ValueError:
             # 如果无法转换为相对路径，保持原样
             pass
-        return super().format(record)
+        # 统一脱敏：DSN 密码、URL 的 apikey/token、鉴权头、Telegram bot token 等。
+        # 放在 Formatter 这一层，任何日志（含第三方库与 traceback）都逃不掉。
+        return redact_secrets(super().format(record))
 
 
 # 默认需要降低日志级别的第三方库

@@ -54,6 +54,7 @@ from sqlalchemy.orm import (
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from src.config import get_config
+from src.utils.log_redact import mask_database_url
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -844,7 +845,7 @@ class DatabaseManager:
         self._run_schema_migrations()
 
         self._initialized = True
-        logger.info(f"数据库初始化完成: {db_url}")
+        logger.info("数据库初始化完成: %s", mask_database_url(db_url))
 
         # 注册退出钩子，确保程序退出时关闭数据库连接
         atexit.register(DatabaseManager._cleanup_engine, self._engine)

@@ -16,7 +16,6 @@
 
 import logging
 import random
-import re
 import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
@@ -26,6 +25,7 @@ from typing import Callable, Optional, List, Tuple, Dict, Any
 import pandas as pd
 import numpy as np
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
+from src.utils.log_redact import redact_secrets
 from .fundamental_adapter import (
     AkshareFundamentalAdapter,
     HkYfinanceFundamentalAdapter,
@@ -39,15 +39,10 @@ logger = logging.getLogger(__name__)
 # === 标准化列名定义 ===
 STANDARD_COLUMNS = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'pct_chg']
 
-# URL / 表单里的密钥参数：apikey、api_key、token、access_token、key、secret
-_SECRET_QUERY_PATTERN = re.compile(
-    r"(?i)\b(apikey|api_key|access_token|token|secret|key)=([^&\s'\"<>]+)"
-)
-
 
 def _redact_url_secrets(text: str) -> str:
-    """把 URL 查询串里的密钥替换成 ***，避免日志落盘泄露。"""
-    return _SECRET_QUERY_PATTERN.sub(r"\1=***", text)
+    """把 URL / 消息里的密钥替换成 ***（统一实现见 src.utils.log_redact）。"""
+    return redact_secrets(text)
 
 
 def unwrap_exception(exc: Exception) -> Exception:

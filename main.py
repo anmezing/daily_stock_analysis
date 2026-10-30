@@ -52,7 +52,7 @@ from typing import List, Tuple
 from data_provider.base import canonical_stock_code
 from src.webui_frontend import prepare_webui_frontend_assets
 from src.config import get_config, Config
-from src.logging_config import setup_logging
+from src.logging_config import setup_logging, RelativePathFormatter
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _setup_bootstrap_logging(debug: bool = False) -> None:
         handler = logging.StreamHandler(sys.stderr)
         handler.setLevel(level)
         handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+            RelativePathFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
         root.addHandler(handler)
 
@@ -788,6 +788,9 @@ def main() -> int:
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
             stream=sys.stderr,
         )
+        # 兜底路径也不能漏密钥：统一换成带脱敏的 Formatter
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(RelativePathFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         logger.warning("Bootstrap 日志初始化失败，已回退到 stderr: %s", exc)
 
     # 加载配置（在 bootstrap logging 之后执行，确保异常有日志）

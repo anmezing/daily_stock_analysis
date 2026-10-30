@@ -58,6 +58,32 @@ from src.config import get_config
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
+# PostgreSQL 会严格校验 VARCHAR 长度，SQLite 不会。凡是值来自行情源或模型输出、
+# 长度不可控的文本列（股票全名、新闻标题、搜索词、模型判断），一律用 TEXT，
+# 从根上避免 "value too long for type character varying(N)" 把整条记录顶掉。
+#
+# 仍然保留 VARCHAR 的列只存我们自己生成的短码（code/source/dimension/...），
+# 写入前统一按【模型里声明的真实列宽】截断，避免常量与列宽漂移。
+
+
+def _column_text_limit(model: Any, column_name: str) -> Optional[int]:
+    """返回列宽；TEXT 列返回 None。"""
+    column = model.__table__.c.get(column_name)
+    if column is None:
+        return None
+    length = getattr(column.type, "length", None)
+    return int(length) if length else None
+
+
+def _clip_to_column(model: Any, column_name: str, value: Optional[Any]) -> Optional[str]:
+    """按列宽截断文本；None 原样返回，TEXT 列不截断。"""
+    if value is None:
+        return None
+    text = str(value)
+    limit = _column_text_limit(model, column_name)
+    return text if limit is None else text[:limit]
+
+
 # SQLAlchemy ORM 基类
 Base = declarative_base()
 
@@ -153,15 +179,15 @@ class NewsIntel(Base):
 
     # 股票信息
     code = Column(String(32), nullable=False, index=True)
-    name = Column(String(50))
+    name = Column(Text)
 
     # 搜索上下文
     dimension = Column(String(32), index=True)  # latest_news / risk_check / earnings / market_analysis / industry
-    query = Column(String(255))
+    query = Column(Text)
     provider = Column(String(32), index=True)
 
     # 新闻内容
-    title = Column(String(300), nullable=False)
+    title = Column(Text, nullable=False)
     snippet = Column(Text)
     url = Column(String(1000), nullable=False)
     source = Column(String(100))
@@ -226,13 +252,13 @@ class AnalysisHistory(Base):
 
     # 股票信息
     code = Column(String(32), nullable=False, index=True)
-    name = Column(String(50))
+    name = Column(Text)
     report_type = Column(String(16), index=True)
 
     # 核心结论
     sentiment_score = Column(Integer)
-    operation_advice = Column(String(20))
-    trend_prediction = Column(String(50))
+    operation_advice = Column(Text)
+    trend_prediction = Column(Text)
     analysis_summary = Column(Text)
 
     # 详细数据
@@ -306,16 +332,16 @@ class BacktestResult(Base):
     evaluated_at = Column(DateTime, default=datetime.now, index=True)
 
     # 建议快照（避免未来分析字段变化导致回测不可解释）
-    operation_advice = Column(String(20))
+    operation_advice = Column(Text)
     position_recommendation = Column(String(8))  # long/cash
 
     # 校准前的原始判断：用于对比"校准到底有没有提升准确率"
-    raw_operation_advice = Column(String(20))
+    raw_operation_advice = Column(Text)
     raw_direction_expected = Column(String(16))
     raw_direction_correct = Column(Boolean, nullable=True)
 
     # 校准器会给出的建议（暂停时也记录），作为影子对照
-    calibration_arm_operation_advice = Column(String(20))
+    calibration_arm_operation_advice = Column(Text)
     calibration_arm_direction_expected = Column(String(16))
     calibration_arm_direction_correct = Column(Boolean, nullable=True)
 
@@ -936,6 +962,19 @@ class DatabaseManager:
             "analysis_history",
             "backtest_results",
         )
+        # name 列最初是 VARCHAR(50)，美股长公司名（如
+        # "Taiwan Semiconductor Manufacturing Company Ltd. ADR"，51 字符）会超长，
+        # PostgreSQL 直接拒绝整条记录。这些列的值全部来自行情源或模型输出，
+        # 长度没有上界，统一放宽为 TEXT。
+        text_columns = {
+            "news_intel": ("name", "title", "query"),
+            "analysis_history": ("name", "operation_advice", "trend_prediction"),
+            "backtest_results": (
+                "operation_advice",
+                "raw_operation_advice",
+                "calibration_arm_operation_advice",
+            ),
+        }
 
         with self._engine.begin() as conn:
             inspector = inspect(conn)
@@ -963,39 +1002,111 @@ class DatabaseManager:
                 for table_name in code_columns:
                     if table_name not in table_names:
                         continue
-                    self._widen_code_column_if_needed(conn, inspector, table_name)
+                    self._widen_column_if_needed(conn, inspector, table_name, "code", 32)
+                for table_name, columns in text_columns.items():
+                    if table_name not in table_names:
+                        continue
+                    for column_name in columns:
+                        self._relax_column_to_text_if_needed(
+                            conn, inspector, table_name, column_name
+                        )
 
-    def _widen_code_column_if_needed(self, conn: Any, inspector: Any, table_name: str) -> None:
-        """Widen legacy code columns for SQL databases that enforce varchar length."""
-        code_column = next(
-            (column for column in inspector.get_columns(table_name) if column["name"] == "code"),
+    def _relax_column_to_text_if_needed(
+        self,
+        conn: Any,
+        inspector: Any,
+        table_name: str,
+        column_name: str,
+    ) -> None:
+        """把历史遗留的 VARCHAR 文本列放宽为 TEXT（长度不可控的字段专用）。"""
+        column = next(
+            (item for item in inspector.get_columns(table_name) if item["name"] == column_name),
             None,
         )
-        if not code_column:
+        if not column:
             return
 
-        length = getattr(code_column.get("type"), "length", None)
-        if length is None or int(length) >= 32:
+        column_type = column.get("type")
+        if isinstance(column_type, Text):
+            return
+        # 某些方言反射出来的 TEXT 是带变体的子类，用类型名再兜一层
+        if getattr(column_type, "length", None) is None and str(column_type).upper().startswith("TEXT"):
             return
 
         dialect = self._engine.dialect.name
-        nullable_sql = "NULL" if code_column.get("nullable", True) else "NOT NULL"
         if dialect in {"postgresql", "postgres"}:
-            ddl = f"ALTER TABLE {table_name} ALTER COLUMN code TYPE VARCHAR(32)"
+            ddl = f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE TEXT"
         elif dialect in {"mysql", "mariadb"}:
-            ddl = f"ALTER TABLE {table_name} MODIFY COLUMN code VARCHAR(32) {nullable_sql}"
+            ddl = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} TEXT"
         elif dialect in {"mssql"}:
-            ddl = f"ALTER TABLE {table_name} ALTER COLUMN code VARCHAR(32) {nullable_sql}"
+            ddl = f"ALTER TABLE {table_name} ALTER COLUMN {column_name} VARCHAR(MAX)"
         else:
             logger.warning(
-                "数据库方言 %s 暂不支持自动扩展 %s.code 列长度，请手动迁移到 VARCHAR(32)",
+                "数据库方言 %s 暂不支持自动把 %s.%s 放宽为 TEXT，请手动迁移",
                 dialect,
                 table_name,
+                column_name,
             )
             return
 
         conn.exec_driver_sql(ddl)
-        logger.info("数据库列长度迁移完成: %s.code VARCHAR(%s) -> VARCHAR(32)", table_name, length)
+        logger.info(
+            "数据库列类型迁移完成: %s.%s %s -> TEXT",
+            table_name,
+            column_name,
+            column_type,
+        )
+
+    def _widen_code_column_if_needed(self, conn: Any, inspector: Any, table_name: str) -> None:
+        """Widen legacy code columns for SQL databases that enforce varchar length."""
+        self._widen_column_if_needed(conn, inspector, table_name, "code", 32)
+
+    def _widen_column_if_needed(
+        self,
+        conn: Any,
+        inspector: Any,
+        table_name: str,
+        column_name: str,
+        min_length: int,
+    ) -> None:
+        """按次扩展列宽；只处理会强制校验 VARCHAR 长度的方言。"""
+        column = next(
+            (item for item in inspector.get_columns(table_name) if item["name"] == column_name),
+            None,
+        )
+        if not column:
+            return
+
+        length = getattr(column.get("type"), "length", None)
+        if length is None or int(length) >= min_length:
+            return
+
+        dialect = self._engine.dialect.name
+        nullable_sql = "NULL" if column.get("nullable", True) else "NOT NULL"
+        if dialect in {"postgresql", "postgres"}:
+            ddl = f"ALTER TABLE {table_name} ALTER COLUMN {column_name} TYPE VARCHAR({min_length})"
+        elif dialect in {"mysql", "mariadb"}:
+            ddl = f"ALTER TABLE {table_name} MODIFY COLUMN {column_name} VARCHAR({min_length}) {nullable_sql}"
+        elif dialect in {"mssql"}:
+            ddl = f"ALTER TABLE {table_name} ALTER COLUMN {column_name} VARCHAR({min_length}) {nullable_sql}"
+        else:
+            logger.warning(
+                "数据库方言 %s 暂不支持自动扩展 %s.%s 列长度，请手动迁移到 VARCHAR(%s)",
+                dialect,
+                table_name,
+                column_name,
+                min_length,
+            )
+            return
+
+        conn.exec_driver_sql(ddl)
+        logger.info(
+            "数据库列长度迁移完成: %s.%s VARCHAR(%s) -> VARCHAR(%s)",
+            table_name,
+            column_name,
+            length,
+            min_length,
+        )
 
     @staticmethod
     def _is_retryable_sqlite_error(exc: Exception) -> bool:
@@ -1183,12 +1294,20 @@ class DatabaseManager:
 
         query_ctx = query_context or {}
         current_query_id = (query_ctx.get("query_id") or "").strip()
+        safe_name = _clip_to_column(NewsIntel, "name", name)
+        safe_query = _clip_to_column(NewsIntel, "query", query)
+        safe_dimension = _clip_to_column(NewsIntel, "dimension", dimension)
+        safe_provider = _clip_to_column(NewsIntel, "provider", response.provider)
+        safe_requester_query = _clip_to_column(
+            NewsIntel, "requester_query", query_ctx.get("requester_query")
+        )
+
         def _worker(session: Session) -> int:
             saved_count = 0
             for item in response.results:
-                title = (item.title or "").strip()
-                url = (item.url or "").strip()
-                source = (item.source or "").strip()
+                title = _clip_to_column(NewsIntel, "title", (item.title or "").strip()) or ""
+                url = _clip_to_column(NewsIntel, "url", (item.url or "").strip()) or ""
+                source = _clip_to_column(NewsIntel, "source", (item.source or "").strip()) or ""
                 snippet = (item.snippet or "").strip()
                 published_date = self._parse_published_date(item.published_date)
 
@@ -1207,10 +1326,10 @@ class DatabaseManager:
                 ).scalar_one_or_none()
 
                 if existing:
-                    existing.name = name or existing.name
-                    existing.dimension = dimension or existing.dimension
-                    existing.query = query or existing.query
-                    existing.provider = response.provider or existing.provider
+                    existing.name = safe_name or existing.name
+                    existing.dimension = safe_dimension or existing.dimension
+                    existing.query = safe_query or existing.query
+                    existing.provider = safe_provider or existing.provider
                     existing.snippet = snippet or existing.snippet
                     existing.source = source or existing.source
                     existing.published_date = published_date or existing.published_date
@@ -1238,7 +1357,7 @@ class DatabaseManager:
                             query_context.get("requester_message_id") or existing.requester_message_id
                         )
                         existing.requester_query = (
-                            query_context.get("requester_query") or existing.requester_query
+                            safe_requester_query or existing.requester_query
                         )
                     continue
 
@@ -1246,10 +1365,10 @@ class DatabaseManager:
                     with session.begin_nested():
                         record = NewsIntel(
                             code=code,
-                            name=name,
-                            dimension=dimension,
-                            query=query,
-                            provider=response.provider,
+                            name=safe_name,
+                            dimension=safe_dimension,
+                            query=safe_query,
+                            provider=safe_provider,
                             title=title,
                             snippet=snippet,
                             url=url_key,
@@ -1263,7 +1382,7 @@ class DatabaseManager:
                             requester_user_name=query_ctx.get("requester_user_name"),
                             requester_chat_id=query_ctx.get("requester_chat_id"),
                             requester_message_id=query_ctx.get("requester_message_id"),
-                            requester_query=query_ctx.get("requester_query"),
+                            requester_query=safe_requester_query,
                         )
                         session.add(record)
                         session.flush()
@@ -1388,12 +1507,16 @@ class DatabaseManager:
         record = AnalysisHistory(
             query_id=query_id,
             code=result.code,
-            name=result.name,
+            name=_clip_to_column(AnalysisHistory, "name", result.name),
             report_type=report_type,
             strategy_id=strategy_id,
             sentiment_score=result.sentiment_score,
-            operation_advice=result.operation_advice,
-            trend_prediction=result.trend_prediction,
+            operation_advice=_clip_to_column(
+                AnalysisHistory, "operation_advice", result.operation_advice
+            ),
+            trend_prediction=_clip_to_column(
+                AnalysisHistory, "trend_prediction", result.trend_prediction
+            ),
             analysis_summary=result.analysis_summary,
             raw_result=self._safe_json_dumps(raw_result),
             news_content=news_content,

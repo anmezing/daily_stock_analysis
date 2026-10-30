@@ -102,14 +102,18 @@ def _silence_existing_litellm_loggers() -> None:
 def _configure_third_party_warnings() -> None:
     """压掉行情库触发的 pandas 弃用警告。
 
-    yfinance 仍在使用 ``DataFrame.sort_index(inplace=True)`` 这类写法，
-    每次拉行情都会刷屏，但对我们没有可操作性，统一在 yfinance 上下文里忽略。
+    yfinance 仍在使用 ``DataFrame.sort_index(inplace=True)`` / ``rename(inplace=True)``
+    这类写法，每次拉行情都会刷屏。注意两点：
+    - pandas 3.x 的 ``Pandas4Warning`` 不保证继承 ``FutureWarning``，所以这里
+      不限定 category（默认 ``Warning`` 能匹配所有子类）；
+    - 同时按"模块"和"消息"各加一条，任一条命中即可。
     """
     import warnings
 
-    warnings.filterwarnings('ignore', category=FutureWarning, module=r'yfinance(\..*)?')
-    warnings.filterwarnings('ignore', category=DeprecationWarning, module=r'yfinance(\..*)?')
-    warnings.filterwarnings('ignore', message=r'.*inplace keyword.*', category=FutureWarning)
+    warnings.filterwarnings('ignore', module=r'yfinance(\..*)?')
+    warnings.filterwarnings('ignore', message=r'.*inplace keyword.*')
+    warnings.filterwarnings('ignore', message=r'.*Pandas4Warning.*')
+    warnings.filterwarnings('ignore', category=FutureWarning, module=r'pandas(\..*)?')
 
 
 def setup_logging(

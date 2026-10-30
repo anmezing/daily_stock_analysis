@@ -65,5 +65,34 @@ class SetupLoggingTest(unittest.TestCase):
         self.assertGreaterEqual(logging.getLogger("litellm").level, logging.ERROR)
 
 
+class ThirdPartyWarningFilterTest(unittest.TestCase):
+    def test_inplace_warning_suppressed_without_futurewarning_inheritance(self) -> None:
+        """pandas 3.x 的 Pandas4Warning 不保证继承 FutureWarning。"""
+        import warnings
+
+        from src.logging_config import _configure_third_party_warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            _configure_third_party_warnings()
+
+            class Pandas4Warning(UserWarning):
+                pass
+
+            warnings.warn("The inplace keyword in DataFrame.rename is deprecated", Pandas4Warning)
+
+        self.assertEqual(caught, [])
+
+    def test_unrelated_warning_still_visible(self) -> None:
+        import warnings
+
+        from src.logging_config import _configure_third_party_warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            _configure_third_party_warnings()
+            warnings.warn("something we should still see", UserWarning)
+
+        self.assertEqual(len(caught), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

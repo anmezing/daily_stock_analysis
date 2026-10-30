@@ -146,7 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] `YfinanceFetcher` 的美股/港股实时行情不再把 `pe_ratio` / `pb_ratio` 固定为 `None`，改为复用已获取的 `ticker.info`（`trailingPE` / `priceToBook`）填充估值字段，不额外发请求；0、负数、NaN、inf 视为无数据。
 - [测试] `tests/conftest.py` 增加数据库隔离：强制测试使用临时 SQLite 并屏蔽 `.env` 中的 `DATABASE_URL`，避免本地跑测试误写线上 PostgreSQL/Supabase；同时移除 `test_tushare_fetcher_get_stock_list` 在导入期加载项目 `.env` 的副作用。
 - [测试] 修复 6 条长期失败用例：`test_report_integrity` 补齐 `ideal_buy`/`secondary_buy` 并新增买点相同必须失败的用例；`test_market_analyzer_generate_text` stub 全局限流器，避免限流 sleep 打断重试退避断言；`test_search_news_freshness` 改用可耗尽队列 side_effect，兼容搜索引擎回退触发的额外查询。
-- [改进] 日志降噪：控制台与常规日志只保留 LiteLLM / httpx / yfinance 等第三方库的 ERROR（调试日志仍保留全部），`LiteLLM`、`LiteLLM Router` 等独立 logger 一并压到 ERROR；yfinance 触发的 pandas `inplace` 弃用警告不再刷屏；LLM 失败日志只保留异常首行，完整 traceback 落到 DEBUG。
+- [修复] 日志降噪：控制台与常规日志只保留 LiteLLM / httpx / yfinance 等第三方库的 ERROR（调试日志仍保留全部），`LiteLLM`、`LiteLLM Router` 等独立 logger 一并压到 ERROR；yfinance 触发的 pandas `inplace` 弃用警告不再刷屏；LLM 失败日志只保留异常首行，完整 traceback 落到 DEBUG。
+- [修复] pandas 3.x 的 `Pandas4Warning` 不继承 `FutureWarning`，原先按 `category=FutureWarning` 过滤对 yfinance 的 `inplace` 警告无效；改为按模块与消息过滤，不限定 category。
 - [修复] Agent 工具结果里的 `NaN`/numpy 标量会让 LiteLLM 转 Gemini `functionResponse` 时重新解析成 float，进而在 httpx 序列化阶段报 `Out of range float values are not JSON compliant`；`serialize_tool_result` / `_convert_messages` 现在统一清洗并禁止输出 `NaN` 字面量，`get_daily_history` 直接返回 JSON 安全记录。
 - [修复] LLM 请求体里的 `nan` / `inf` 会导致 httpx 在发出请求前抛 `ValueError: Out of range float values are not JSON compliant`，被 LiteLLM 包成 `APIConnectionError`、看起来像网络故障；现在调用前统一清洗非法数值并告警具体字段路径，`LLM_TEMPERATURE` 等温度配置也会拒绝 `nan`/`inf` 并回退默认值。
 - [修复] `DatabaseManager.get_instance()` 在首次初始化失败（数据库尚未就绪、密码刚改完）时会留下 `_initialized=False` 的坏单例，之后所有请求都报“DatabaseManager 未正确初始化”，数据库恢复也只能重启进程；现在未初始化时会重新初始化。

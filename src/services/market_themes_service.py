@@ -136,15 +136,43 @@ def _format_return(value: Optional[float]) -> str:
     return "N/A" if value is None else f"{value:+.2f}%"
 
 
+def _download_closes_via_twelvedata(symbols: List[str]) -> Dict[str, List[float]]:
+    """Fallback when Yahoo rate-limits: reuse the configured Twelve Data keys."""
+    try:
+        from data_provider.twelvedata_fetcher import TwelveDataFetcher
+
+        fetcher = TwelveDataFetcher()
+        if not fetcher.is_api_ready():
+            return {}
+        result: Dict[str, List[float]] = {}
+        for symbol in symbols:
+            try:
+                frame, _ = fetcher.get_daily_data(symbol, days=260)
+                if frame is None or getattr(frame, "empty", True):
+                    continue
+                series = frame["close"].dropna()
+                closes = [float(item) for item in series.tolist() if _to_float(item)]
+                if len(closes) >= 2:
+                    result[symbol] = closes
+            except Exception:
+                continue
+        return result
+    except Exception as exc:
+        logger.debug("[市场热点] Twelve Data 兜底失败: %s", exc)
+        return {}
+
+
 class MarketThemesService:
     """Build a cached market-theme snapshot for US/HK."""
 
     def __init__(
         self,
         fetcher: Optional[Callable[[List[str]], Dict[str, List[float]]]] = None,
+        fallback_fetcher: Optional[Callable[[List[str]], Dict[str, List[float]]]] = None,
         ttl_seconds: int = _CACHE_TTL_SECONDS,
     ) -> None:
         self._fetcher = fetcher or _download_closes
+        self._fallback_fetcher = fallback_fetcher or _download_closes_via_twelvedata
         self._ttl = max(0, int(ttl_seconds))
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = RLock()
@@ -176,6 +204,14 @@ class MarketThemesService:
         except Exception as exc:
             logger.warning("[市场热点] %s 拉取失败: %s", market, exc)
             closes_by_symbol = {}
+
+        if not closes_by_symbol and self._fallback_fetcher is not None:
+            try:
+                closes_by_symbol = self._fallback_fetcher(symbols) or {}
+                if closes_by_symbol:
+                    logger.info("[市场热点] %s 已切换到 Twelve Data 兜底", market)
+            except Exception as exc:
+                logger.debug("[市场热点] %s 兜底失败: %s", market, exc)
 
         if not closes_by_symbol:
             data = {

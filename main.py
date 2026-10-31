@@ -42,6 +42,7 @@ if os.getenv("GITHUB_ACTIONS") != "true" and os.getenv("USE_PROXY", "false").low
     os.environ["https_proxy"] = proxy_url
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -284,6 +285,44 @@ def parse_arguments() -> argparse.Namespace:
         '--force-run',
         action='store_true',
         help='跳过交易日检查，强制执行全量分析（Issue #373）'
+    )
+
+    parser.add_argument(
+        '--screen',
+        action='store_true',
+        help='运行热门板块选股（领涨板块 → 板块内潜力股）'
+    )
+
+    parser.add_argument(
+        '--screen-top',
+        type=int,
+        default=10,
+        help='选股输出数量（默认 10）'
+    )
+
+    parser.add_argument(
+        '--screen-analyze',
+        action='store_true',
+        help='选股后直接把 Top N 交给完整分析链路（会调用 LLM）'
+    )
+
+    parser.add_argument(
+        '--screen-min-score',
+        type=float,
+        default=65.0,
+        help='选股最低评分（默认 65，低于该分数不输出）'
+    )
+
+    parser.add_argument(
+        '--screen-backtest',
+        action='store_true',
+        help='附带一段粗略的 walk-forward 验证（10 日超额胜率）'
+    )
+
+    parser.add_argument(
+        '--screen-schedule',
+        action='store_true',
+        help='选股独立定时任务（默认 08:30 容器时区，独立 state 文件）'
     )
 
     parser.add_argument(
@@ -790,6 +829,99 @@ def _resolve_web_server_mode(config: Config, args: argparse.Namespace) -> Tuple[
     return True, "webui_enabled"
 
 
+def run_screener(config: Config, args: argparse.Namespace) -> Dict:
+    """Run the hot-sector screener, persist the report and notify."""
+    from src.services.stock_screener_service import get_stock_screener_service
+
+    service = get_stock_screener_service()
+    screen_result = service.screen(
+        market="us",
+        top_n=getattr(args, 'screen_top', 10),
+        min_score=getattr(args, 'screen_min_score', 65.0),
+        backtest=getattr(args, 'screen_backtest', False),
+    )
+    report = service.render_markdown(
+        screen_result,
+        top_n=getattr(args, 'screen_top', 10),
+    )
+    print(report)
+    logger.info("选股结果:\n%s", report)
+
+    try:
+        from src.notification import NotificationService
+
+        saved_path = NotificationService().save_report_to_file(
+            report,
+            filename=f"screener_{datetime.now().strftime('%Y%m%d')}.md",
+        )
+        logger.info("选股报告已保存: %s", saved_path)
+    except Exception as exc:
+        logger.warning("选股报告保存失败: %s", exc)
+
+    try:
+        latest_path = Path("data") / "screener_latest.json"
+        latest_path.parent.mkdir(parents=True, exist_ok=True)
+        latest_path.write_text(
+            json.dumps(
+                {
+                    "screen_date": datetime.now().date().isoformat(),
+                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                    "result": screen_result,
+                    "markdown": report,
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.debug("选股结果 JSON 保存失败: %s", exc)
+
+    if not getattr(args, 'no_notify', False) and screen_result.get("status") == "ok":
+        try:
+            from src.notification import NotificationService
+
+            NotificationService().send(report)
+        except Exception as exc:
+            logger.warning("选股结果推送失败: %s", exc)
+
+    # Post-selection watch: stop/target/earnings/new filings for open picks.
+    try:
+        from data_provider.fundamental_adapter import UsSecFundamentalAdapter
+        from src.services.screener_learning_service import get_screener_learning_service
+        from src.services.screener_monitor_service import ScreenerMonitorService
+
+        ScreenerMonitorService(
+            learning_service=get_screener_learning_service(),
+            filing_provider=UsSecFundamentalAdapter(),
+            notify=not getattr(args, 'no_notify', False),
+        ).check()
+    except Exception as exc:
+        logger.warning("选股后监控失败: %s", exc)
+
+    return screen_result
+
+
+def run_screener_schedule(config: Config, args: argparse.Namespace) -> int:
+    """Independent daily screener loop (own container / state file)."""
+    from src.scheduler import run_with_schedule
+
+    def task() -> None:
+        runtime_config = _reload_runtime_config()
+        run_screener(runtime_config, args)
+
+    logger.info(
+        "模式: 选股定时任务，每天 %s（容器时区）执行",
+        getattr(config, 'screener_schedule_time', '08:30'),
+    )
+    run_with_schedule(
+        task,
+        schedule_time=getattr(config, 'screener_schedule_time', '08:30'),
+        run_immediately=getattr(config, 'screener_run_immediately', False),
+    )
+    return 0
+
+
 def main() -> int:
     """
     主入口函数
@@ -823,7 +955,8 @@ def main() -> int:
 
     # 配置日志（输出到控制台和文件）
     try:
-        setup_logging(log_prefix="stock_analysis", debug=args.debug, log_dir=config.log_dir)
+        log_prefix = "screener" if (getattr(args, 'screen', False) or getattr(args, 'screen_schedule', False)) else "stock_analysis"
+        setup_logging(log_prefix=log_prefix, debug=args.debug, log_dir=config.log_dir)
     except Exception as exc:
         logger.exception("切换到配置日志目录失败: %s", exc)
         return 1
@@ -857,6 +990,8 @@ def main() -> int:
         or getattr(args, "dry_run", False)
         or getattr(args, "market_review", False)
         or getattr(args, "backtest", False)
+        or getattr(args, "screen", False)
+        or getattr(args, "screen_schedule", False)
     )
 
     # 兼容旧版 WEBUI_ENABLED 环境变量：
@@ -908,6 +1043,30 @@ def main() -> int:
         return 0
 
     try:
+        # 模式 -1: 热门板块选股
+        if getattr(args, 'screen', False):
+            logger.info("模式: 热门板块选股")
+            screen_result = run_screener(config, args)
+
+            if not getattr(args, 'screen_analyze', False):
+                return 0
+
+            picks = [
+                str(item.get("symbol"))
+                for item in (screen_result.get("picks") or [])
+                if item.get("symbol")
+            ]
+            if not picks:
+                logger.warning("选股没有可用标的，跳过分析")
+                return 0
+            logger.info("选股完成，继续分析: %s", picks)
+            run_full_analysis(config, args, picks)
+            return 0
+
+        # 模式 -1b: 选股独立定时任务
+        if getattr(args, 'screen_schedule', False):
+            return run_screener_schedule(config, args)
+
         # 模式0: 回测
         if getattr(args, 'backtest', False):
             logger.info("模式: 回测")

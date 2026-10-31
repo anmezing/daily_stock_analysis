@@ -97,6 +97,48 @@ services:
         reservations:
           memory: 256M
 
+  # Independent screener schedule (08:30 ET by default).  It shares the
+  # image and data volumes but writes its own schedule state, log prefix and
+  # report files, so it cannot disturb the 10:00 ET analysis run.
+  screener:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: stock-screener
+    restart: unless-stopped
+    command: ["python", "main.py", "--screen-schedule"]
+    env_file:
+      - ../.env
+    environment:
+      - TZ=America/New_York
+      - WEBUI_ENABLED=false
+      - SCHEDULE_STATE_PATH=data/.screener_schedule_state.json
+      - SCREENER_SCHEDULE_TIME=${SCREENER_SCHEDULE_TIME:-08:30}
+      - SCREENER_RUN_IMMEDIATELY=${SCREENER_RUN_IMMEDIATELY:-false}
+    networks:
+      - dsa-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      disable: true
+    volumes:
+      - ../data:/app/data
+      - ../logs:/app/logs
+      - ../reports:/app/reports
+      - ../.env:/app/.env
+      - ../strategies:/app/strategies:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+        reservations:
+          memory: 192M
+
 networks:
   dsa-net:
     external: true

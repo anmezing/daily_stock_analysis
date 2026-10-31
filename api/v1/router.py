@@ -19,6 +19,7 @@ from api.v1.endpoints import (
     health,
     history,
     portfolio,
+    screener,
     stocks,
     system_config,
     usage,
@@ -79,6 +80,12 @@ router.include_router(
     portfolio.router,
     prefix="/portfolio",
     tags=["Portfolio"]
+)
+
+router.include_router(
+    screener.router,
+    prefix="/screener",
+    tags=["Screener"]
 )
 
 # /api/v1/health：与 /api/health 一致，含数据库探活

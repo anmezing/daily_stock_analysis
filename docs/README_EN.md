@@ -44,6 +44,7 @@ English | [简体中文](../README.md) | [繁體中文](README_CHT.md)
 | Analysis | Multi-dimensional Analysis | Technicals + chip distribution + sentiment + real-time quotes |
 | Market | Global Markets | A-shares, Hong Kong stocks, US stocks |
 | Market | Themes & Relative Strength | Leading/lagging sector ETFs, SPY/QQQ risk-on/off, and 20d/60d excess return versus the benchmark |
+| Screener | Hot-sector stock picker | Ranks constituents of leading sectors by 15/30d relative strength, pullback/breakout setup and liquidity; outputs early-entry/watch/extended states with a trade plan (`python main.py --screen`) |
 | Search | Smart Autocomplete (MVP) | **[Beta]** Home search supports code/name/pinyin/aliases; the local index now covers A-shares, Hong Kong, and US stocks and can be refreshed from Tushare or AkShare data |
 | Review | Market Review | Daily overview, sectors, northbound capital flow |
 | Intel | Announcement + Capital Flow Intelligence | IntelAgent now also pulls listed-company announcements (SSE/SZSE/CNINFO) and A-share main-force capital flow, and exposes `capital_flow_signal` (`inflow/outflow/neutral/not_available`) for flow direction context |

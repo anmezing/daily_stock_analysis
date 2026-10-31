@@ -9,6 +9,7 @@ import LoginPage from './pages/LoginPage';
 import NotFoundPage from './pages/NotFoundPage';
 import ChatPage from './pages/ChatPage';
 import PortfolioPage from './pages/PortfolioPage';
+import ScreenerPage from './pages/ScreenerPage';
 import { ApiErrorAlert } from './components/common';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { useAgentChatStore } from './stores/agentChatStore';
@@ -31,6 +32,14 @@ const BacktestIcon: React.FC<{ active?: boolean }> = ({active}) => (
 
 const PortfolioIcon: React.FC<{ active?: boolean }> = ({active}) => (
     <RiExchangeFundsLine className="w-6 h-6" size={active ? 25 : 24} />
+);
+
+const ScreenerIcon: React.FC<{ active?: boolean }> = ({active}) => (
+    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={active ? 2 : 1.5}
+              d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6l2.1 2.1m0-12.8l-2.1 2.1M7.7 16.3l-2.1 2.1"/>
+        <circle cx="12" cy="12" r="3.2" strokeWidth={active ? 2 : 1.5}/>
+    </svg>
 );
 
 const SettingsIcon: React.FC<{ active?: boolean }> = ({active}) => (
@@ -80,6 +89,12 @@ const NAV_ITEMS: DockItem[] = [
         label: '持仓',
         to: '/portfolio',
         icon: PortfolioIcon,
+    },
+    {
+        key: 'screener',
+        label: '选股',
+        to: '/screener',
+        icon: ScreenerIcon,
     },
     {
         key: 'backtest',
@@ -219,6 +234,7 @@ const AppContent: React.FC = () => {
                     <Route path="/" element={<HomePage/>}/>
                     <Route path="/chat" element={<ChatPage/>}/>
                     <Route path="/portfolio" element={<PortfolioPage/>}/>
+                    <Route path="/screener" element={<ScreenerPage/>}/>
                     <Route path="/backtest" element={<BacktestPage/>}/>
                     <Route path="/settings" element={<SettingsPage/>}/>
                     <Route path="/login" element={<LoginPage/>}/>

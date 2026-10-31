@@ -77,7 +77,11 @@ class MarketThemesServiceTest(unittest.TestCase):
         self.assertIn("恒生", data["summary"])
 
     def test_empty_provider_returns_not_supported(self) -> None:
-        service = MarketThemesService(fetcher=lambda symbols: {}, ttl_seconds=0)
+        service = MarketThemesService(
+            fetcher=lambda symbols: {},
+            fallback_fetcher=lambda symbols: {},
+            ttl_seconds=0,
+        )
         data = service.get_snapshot("us")
         self.assertEqual(data["status"], "not_supported")
 

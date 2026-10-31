@@ -237,6 +237,76 @@ os.environ["https_proxy"] = "http://your-proxy:port"
 
 ---
 
+## 🔎 选股定时任务与 Web 页面
+
+选股与每日分析是两条独立链路：
+
+- `analyzer`：10:00 ET 分析自选股
+- `screener`：08:30 ET 选股，独立 state/日志/报告，不修改 `STOCK_LIST`
+
+### 部署
+
+`docker/docker-compose.server.yml` 已包含 `screener` 服务：
+
+```bash
+docker compose -f docker/docker-compose.server.yml up -d screener
+docker compose -f docker/docker-compose.server.yml logs -f --tail=100 screener
+```
+
+时间由 `.env` 控制：
+
+```dotenv
+SCREENER_SCHEDULE_TIME=08:30
+SCREENER_RUN_IMMEDIATELY=false
+```
+
+容器时区是 `America/New_York`，所以 `08:30` 就是美东 08:30。错过时间时，6 小时补跑窗口会自动补一次。
+
+### 结果位置
+
+```bash
+# 最新选股 Markdown
+ls -t reports/screener_*.md | head -1
+cat $(ls -t reports/screener_*.md | head -1)
+
+# 选股台账（T+5/T+10/T+20 结果会自动补）
+tail -n 5 data/screener_picks.jsonl
+
+# 自动学习状态
+cat data/screener_learning.json
+
+# 选股日志（独立前缀）
+tail -f logs/screener_*.log
+```
+
+### Web 页面
+
+登录 Web 后左侧导航新增「选股」：
+
+```
+https://<你的域名>/screener
+```
+
+对应 API：
+
+```
+GET /api/v1/screener/latest
+GET /api/v1/screener/history
+GET /api/v1/screener/report/YYYY-MM-DD
+GET /api/v1/screener/learning
+```
+
+页面只读，展示：今日主线、Top N 表格、过滤统计、自动学习状态、每只票的交易计划。不会触发分析，也不会修改自选股。
+
+### 手动触发
+
+```bash
+docker compose -f docker/docker-compose.server.yml run --rm -T \
+  analyzer python main.py --screen --no-notify
+```
+
+---
+
 ## 📊 监控与维护
 
 ### 日志查看

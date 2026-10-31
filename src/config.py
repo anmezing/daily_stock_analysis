@@ -750,6 +750,9 @@ class Config:
     schedule_enabled: bool = False            # 是否启用定时任务
     schedule_time: str = "18:00"              # 每日推送时间（HH:MM 格式）
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
+    # 选股定时任务（独立容器，默认 08:30 美东，避开 10:00 的分析任务）
+    screener_schedule_time: str = "08:30"
+    screener_run_immediately: bool = False
     run_immediately: bool = True              # 启动时是否立即执行一次（非定时模式）
     market_review_enabled: bool = True        # 是否启用大盘复盘
     # 大盘复盘市场区域：cn(A股)、us(美股)、both(两者)，us 适合仅关注美股的用户
@@ -1405,6 +1408,8 @@ class Config:
             schedule_enabled=os.getenv('SCHEDULE_ENABLED', 'false').lower() == 'true',
             schedule_time=os.getenv('SCHEDULE_TIME', '18:00'),
             schedule_run_immediately=schedule_run_immediately,
+            screener_schedule_time=os.getenv('SCREENER_SCHEDULE_TIME', '08:30'),
+            screener_run_immediately=os.getenv('SCREENER_RUN_IMMEDIATELY', 'false').lower() == 'true',
             run_immediately=legacy_run_immediately,
             market_review_enabled=os.getenv('MARKET_REVIEW_ENABLED', 'true').lower() == 'true',
             market_review_region=cls._parse_market_review_region(

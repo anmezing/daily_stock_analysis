@@ -23,7 +23,7 @@
 """
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from dotenv import dotenv_values
 from src.config import setup_env
@@ -323,6 +323,12 @@ def parse_arguments() -> argparse.Namespace:
         '--screen-schedule',
         action='store_true',
         help='选股独立定时任务（默认 08:30 容器时区，独立 state 文件）'
+    )
+
+    parser.add_argument(
+        '--analyze-pool',
+        action='store_true',
+        help='选股后对当前股池中仍在跟踪的标的跑完整分析（会调用 LLM）'
     )
 
     parser.add_argument(
@@ -840,10 +846,50 @@ def run_screener(config: Config, args: argparse.Namespace) -> Dict:
         min_score=getattr(args, 'screen_min_score', 65.0),
         backtest=getattr(args, 'screen_backtest', False),
     )
+    pool: Dict[str, Any] = {}
+    pool_service = None
+    try:
+        from src.services.screener_pool_service import get_screener_pool_service
+
+        pool_service = get_screener_pool_service()
+        pool = pool_service.update(screen_result)
+    except Exception as exc:
+        logger.warning("候选池更新失败: %s", exc)
+
+    # Post-selection watch: stop/target/earnings/new filings for open picks.
+    monitor_alerts: List[Dict] = []
+    try:
+        from data_provider.fundamental_adapter import UsSecFundamentalAdapter
+        from src.services.screener_learning_service import get_screener_learning_service
+        from src.services.screener_monitor_service import ScreenerMonitorService
+
+        monitor_result = ScreenerMonitorService(
+            learning_service=get_screener_learning_service(),
+            filing_provider=UsSecFundamentalAdapter(),
+            notify=not getattr(args, 'no_notify', False),
+        ).check()
+        monitor_alerts = monitor_result.get("alerts") or []
+    except Exception as exc:
+        logger.warning("选股后监控失败: %s", exc)
+
+    if pool_service is not None and monitor_alerts:
+        try:
+            pool = pool_service.apply_alerts(monitor_alerts)
+        except Exception as exc:
+            logger.debug("候选池应用告警失败: %s", exc)
+
     report = service.render_markdown(
         screen_result,
         top_n=getattr(args, 'screen_top', 10),
     )
+    if pool_service is not None:
+        try:
+            pool_markdown = pool_service.render_markdown(pool)
+            if pool_markdown:
+                report = f"{report}\n\n{pool_markdown}\n"
+        except Exception as exc:
+            logger.debug("候选池渲染失败: %s", exc)
+
     print(report)
     logger.info("选股结果:\n%s", report)
 
@@ -868,6 +914,7 @@ def run_screener(config: Config, args: argparse.Namespace) -> Dict:
                     "generated_at": datetime.now().isoformat(timespec="seconds"),
                     "result": screen_result,
                     "markdown": report,
+                    "pool": pool,
                 },
                 ensure_ascii=False,
                 default=str,
@@ -878,26 +925,21 @@ def run_screener(config: Config, args: argparse.Namespace) -> Dict:
         logger.debug("选股结果 JSON 保存失败: %s", exc)
 
     if not getattr(args, 'no_notify', False) and screen_result.get("status") == "ok":
-        try:
-            from src.notification import NotificationService
+        pool_notice = ""
+        if pool_service is not None:
+            try:
+                pool_notice = pool_service.build_notification(pool)
+            except Exception as exc:
+                logger.debug("股池通知生成失败: %s", exc)
+        if pool_notice:
+            try:
+                from src.notification import NotificationService
 
-            NotificationService().send(report)
-        except Exception as exc:
-            logger.warning("选股结果推送失败: %s", exc)
-
-    # Post-selection watch: stop/target/earnings/new filings for open picks.
-    try:
-        from data_provider.fundamental_adapter import UsSecFundamentalAdapter
-        from src.services.screener_learning_service import get_screener_learning_service
-        from src.services.screener_monitor_service import ScreenerMonitorService
-
-        ScreenerMonitorService(
-            learning_service=get_screener_learning_service(),
-            filing_provider=UsSecFundamentalAdapter(),
-            notify=not getattr(args, 'no_notify', False),
-        ).check()
-    except Exception as exc:
-        logger.warning("选股后监控失败: %s", exc)
+                NotificationService().send(pool_notice)
+            except Exception as exc:
+                logger.warning("股池通知推送失败: %s", exc)
+        else:
+            logger.info("没有新晋级的持续候选，跳过选股推送")
 
     return screen_result
 
@@ -1047,6 +1089,22 @@ def main() -> int:
         if getattr(args, 'screen', False):
             logger.info("模式: 热门板块选股")
             screen_result = run_screener(config, args)
+
+            if getattr(args, 'analyze_pool', False):
+                from src.services.screener_pool_service import get_screener_pool_service
+
+                pool = get_screener_pool_service().load()
+                pool_codes = [
+                    item.get("symbol")
+                    for item in (pool.get("items") or {}).values()
+                    if item.get("stage") in ("watching", "ready", "trigger")
+                ]
+                if not pool_codes:
+                    logger.warning("股池没有可分析标的，跳过分析")
+                    return 0
+                logger.info("股池分析: %s", pool_codes)
+                run_full_analysis(config, args, pool_codes)
+                return 0
 
             if not getattr(args, 'screen_analyze', False):
                 return 0

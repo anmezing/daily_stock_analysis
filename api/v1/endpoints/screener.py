@@ -88,3 +88,17 @@ def get_screener_alerts() -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"选股告警读取失败: {exc}") from exc
+
+
+@router.get("/pool")
+def get_screener_pool() -> Dict[str, Any]:
+    """Return the multi-day candidate pool with stages and streaks."""
+    path = _DATA_DIR / "screener_pool.json"
+    if not path.exists():
+        return {"status": "empty", "items": {}, "summary": {}}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.setdefault("status", "ok")
+        return payload
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"候选池读取失败: {exc}") from exc

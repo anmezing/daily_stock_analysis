@@ -112,3 +112,30 @@ export interface ScreenerAlerts {
   generatedAt?: string;
   alerts?: ScreenerAlert[];
 }
+
+export interface ScreenerPoolItem {
+  symbol: string;
+  name?: string;
+  sectorName?: string;
+  firstSeen?: string;
+  lastSeen?: string;
+  daysSeen?: number;
+  consecutiveDays?: number;
+  missingDays?: number;
+  todaySelected?: boolean;
+  stage?: string;
+  lastScore?: number;
+  fundamentalScore?: number | null;
+  fundamentalTrend?: string;
+  riskLevel?: string;
+  riskNote?: string;
+  plan?: ScreenerPlan;
+}
+
+export interface ScreenerPool {
+  status?: string;
+  updatedAt?: string;
+  tradeDate?: string;
+  items?: Record<string, ScreenerPoolItem>;
+  summary?: Record<string, number>;
+}

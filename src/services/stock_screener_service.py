@@ -502,6 +502,7 @@ class StockScreenerService:
             )
             for candidate in candidates
         }
+        qualified = list(picks)
         picks, correlation_skipped = self._select_diversified(
             picks,
             top_n,
@@ -509,12 +510,19 @@ class StockScreenerService:
             max_per_sector=max(2, math.ceil(max(1, int(top_n or 10)) / max(1, len(leaders)))),
         )
         filter_stats["correlation_skipped"] = correlation_skipped
+        selected_symbols = {item.get("symbol") for item in picks}
+        challengers = [
+            item for item in qualified
+            if item.get("symbol") not in selected_symbols
+        ][: max(10, int(top_n or 10) * 2)]
 
         if self._learning is not None and picks:
             try:
+                for item in challengers:
+                    item["is_challenger"] = True
                 self._learning.record_picks({
                     "status": "ok",
-                    "picks": picks,
+                    "picks": picks + challengers,
                 })
             except Exception as exc:
                 logger.debug("[选股学习] 记录 picks 失败: %s", exc)
@@ -550,6 +558,7 @@ class StockScreenerService:
                 for row in leaders
             ],
             "picks": picks,
+            "challengers": challengers,
             "summary": summary,
         }
 
@@ -683,18 +692,38 @@ class StockScreenerService:
             if len(selected) >= target:
                 break
             sector = str(pick.get("sector_name") or pick.get("sector_etf"))
-            if sector_counts.get(sector, 0) >= max_per_sector:
+            candidate_returns = returns_by_symbol.get(pick["symbol"]) or []
+            replaced = False
+            correlated = False
+            # If this name is highly correlated with an existing pick but is
+            # clearly stronger, replace the weaker one instead of silently
+            # dropping the challenger.
+            for index, existing in enumerate(selected):
+                existing_returns = returns_by_symbol.get(existing["symbol"]) or []
+                if _correlation(candidate_returns, existing_returns) <= MAX_CORRELATION:
+                    continue
+                correlated = True
+                if float(pick.get("score") or 0) > float(existing.get("score") or 0) + 2.0:
+                    selected[index] = pick
+                    replaced = True
+                break
+            if replaced:
+                continue
+            if correlated:
                 skipped += 1
                 continue
-            candidate_returns = returns_by_symbol.get(pick["symbol"]) or []
-            too_correlated = False
-            for existing in selected:
-                existing_returns = returns_by_symbol.get(existing["symbol"]) or []
-                if _correlation(candidate_returns, existing_returns) > MAX_CORRELATION:
-                    too_correlated = True
-                    break
-            if too_correlated:
-                skipped += 1
+            if sector_counts.get(sector, 0) >= max_per_sector:
+                # Sector cap reached: keep the strongest, not the first seen.
+                weakest = min(
+                    (item for item in selected if str(item.get("sector_name") or item.get("sector_etf")) == sector),
+                    key=lambda item: float(item.get("score") or 0),
+                    default=None,
+                )
+                if weakest is not None and float(pick.get("score") or 0) > float(weakest.get("score") or 0) + 2.0:
+                    selected.remove(weakest)
+                    selected.append(pick)
+                else:
+                    skipped += 1
                 continue
             selected.append(pick)
             sector_counts[sector] = sector_counts.get(sector, 0) + 1

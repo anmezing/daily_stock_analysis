@@ -53,6 +53,23 @@ class ScreenerApiTest(unittest.TestCase):
             self.assertEqual(history["items"][0]["date"], "2026-10-31")
             self.assertEqual(report["markdown"], "new")
 
+    def test_pool_and_alerts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            (data_dir / "screener_pool.json").write_text(
+                json.dumps({"items": {"AAA": {"stage": "ready"}}, "summary": {}}),
+                encoding="utf-8",
+            )
+            (data_dir / "screener_alerts.json").write_text(
+                json.dumps({"alerts": [{"symbol": "AAA", "kind": "stop_breach"}]}),
+                encoding="utf-8",
+            )
+            with patch.object(screener, "_DATA_DIR", data_dir):
+                pool = screener.get_screener_pool()
+                alerts = screener.get_screener_alerts()
+            self.assertEqual(pool["items"]["AAA"]["stage"], "ready")
+            self.assertEqual(alerts["alerts"][0]["kind"], "stop_breach")
+
 
 if __name__ == "__main__":
     unittest.main()

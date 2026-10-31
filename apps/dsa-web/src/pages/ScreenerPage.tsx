@@ -16,6 +16,7 @@ import type {
   ScreenerAlert,
   ScreenerLatest,
   ScreenerPick,
+  ScreenerPool,
 } from '../types/screener';
 
 const pct = (value?: number | null): string => {
@@ -70,6 +71,7 @@ const PlanCard: React.FC<{ pick: ScreenerPick }> = ({ pick }) => {
 const ScreenerPage: React.FC = () => {
   const [latest, setLatest] = useState<ScreenerLatest | null>(null);
   const [alerts, setAlerts] = useState<ScreenerAlert[]>([]);
+  const [pool, setPool] = useState<ScreenerPool | null>(null);
   const [loading, setLoading] = useState(true);
   const [empty, setEmpty] = useState(false);
   const [error, setError] = useState<ParsedApiError | null>(null);
@@ -96,6 +98,12 @@ const ScreenerPage: React.FC = () => {
     } catch {
       setAlerts([]);
     }
+    try {
+      const poolData = await screenerApi.getPool();
+      setPool(poolData);
+    } catch {
+      setPool(null);
+    }
     setLoading(false);
   }, []);
 
@@ -106,6 +114,13 @@ const ScreenerPage: React.FC = () => {
 
   const result = latest?.result;
   const picks = result?.picks || [];
+  const poolItems = Object.values(pool?.items || {})
+    .filter((item) => item.stage !== 'dropped')
+    .sort(
+      (a, b) =>
+        (b.consecutiveDays || 0) - (a.consecutiveDays || 0)
+        || (b.lastScore || 0) - (a.lastScore || 0),
+    );
 
   return (
     <AppPage className="space-y-5">
@@ -181,6 +196,71 @@ const ScreenerPage: React.FC = () => {
                     {' '}{alert.name || ''}：{alert.message}
                   </p>
                 ))}
+              </div>
+            </Card>
+          ) : null}
+
+          {poolItems.length ? (
+            <Card padding="none" className="overflow-hidden">
+              <div className="border-b border-white/8 px-4 py-3">
+                <span className="label-uppercase">🧺 股池（持续跟踪）</span>
+                <p className="mt-1 text-xs text-muted-text">
+                  连续在榜、相对强势、基本面不转弱才保留；停止满足条件会自动移出。
+                </p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px] text-left text-sm">
+                  <thead className="border-b border-white/8 bg-elevated/40 text-xs uppercase tracking-wide text-muted-text">
+                    <tr>
+                      <th className="px-3 py-2">代码</th>
+                      <th className="px-3 py-2">名称</th>
+                      <th className="px-3 py-2 text-right">连续</th>
+                      <th className="px-3 py-2 text-right">累计</th>
+                      <th className="px-3 py-2">今日入选</th>
+                      <th className="px-3 py-2">基本面趋势</th>
+                      <th className="px-3 py-2">阶段</th>
+                      <th className="px-3 py-2">板块</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {poolItems.map((item) => (
+                      <tr key={`pool-${item.symbol}`} className="border-b border-white/5 last:border-0">
+                        <td className="px-3 py-2 font-mono text-white">{item.symbol}</td>
+                        <td className="px-3 py-2 text-secondary-text">{item.name}</td>
+                        <td className="px-3 py-2 text-right font-mono text-cyan">{item.consecutiveDays}</td>
+                        <td className="px-3 py-2 text-right font-mono text-secondary-text">{item.daysSeen}</td>
+                        <td className="px-3 py-2 text-center">
+                          {item.todaySelected ? <span className="text-success">是</span> : <span className="text-muted-text">否</span>}
+                        </td>
+                        <td className="px-3 py-2">
+                          <Badge
+                            variant={item.fundamentalTrend === 'improving' ? 'success' : item.fundamentalTrend === 'worsening' ? 'danger' : 'default'}
+                          >
+                            {item.fundamentalTrend === 'improving'
+                              ? '改善'
+                              : item.fundamentalTrend === 'worsening'
+                                ? '转弱'
+                                : item.fundamentalTrend === 'stable'
+                                  ? '持平'
+                                  : '数据不足'}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2">
+                          <Badge
+                            variant={item.stage === 'trigger' ? 'success' : item.stage === 'ready' ? 'info' : 'warning'}
+                          >
+                            {item.stage === 'trigger'
+                              ? '触发买入'
+                              : item.stage === 'ready'
+                                ? '买入候选'
+                                : '继续观察'}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2 text-secondary-text">{item.sectorName}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </Card>
           ) : null}

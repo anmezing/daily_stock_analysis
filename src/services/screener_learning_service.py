@@ -268,6 +268,7 @@ class ScreenerLearningService:
                 "days_to_earnings": pick.get("days_to_earnings"),
                 "risk_level": pick.get("risk_level"),
                 "filing_risks": pick.get("filing_risks") or [],
+                "is_challenger": bool(pick.get("is_challenger")),
                 "outcomes": index.get((day, symbol), {}).get("outcomes", {}),
             }
             index[(day, symbol)] = record

@@ -4,6 +4,7 @@ import type {
   ScreenerAlerts,
   ScreenerHistoryItem,
   ScreenerLatest,
+  ScreenerPool,
   ScreenerReport,
 } from '../types/screener';
 
@@ -32,5 +33,10 @@ export const screenerApi = {
   getAlerts: async (): Promise<ScreenerAlerts> => {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/screener/alerts');
     return toCamelCase<ScreenerAlerts>(response.data);
+  },
+
+  getPool: async (): Promise<ScreenerPool> => {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/screener/pool');
+    return toCamelCase<ScreenerPool>(response.data);
   },
 };

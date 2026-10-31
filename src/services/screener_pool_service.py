@@ -27,8 +27,12 @@ logger = logging.getLogger(__name__)
 _POOL_PATH = Path(__file__).resolve().parents[2] / "data" / "screener_pool.json"
 _MAX_PER_SECTOR = 2
 _MAX_HISTORY = 10
-_READY_DAYS = 3
+_PROMOTE_DAYS = 5
+_PUSH_DAYS = 5
+_STRONG_DAYS = 10
 _MAX_ABSENT_DAYS = 10
+_SECTOR_WINDOW = 5
+_SECTOR_MIN_DAYS = 3
 
 
 def _project_path() -> Path:
@@ -78,8 +82,17 @@ def _trend(history: List[float]) -> str:
 
 
 class ScreenerPoolService:
-    def __init__(self, path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        promote_days: int = _PROMOTE_DAYS,
+        push_days: int = _PUSH_DAYS,
+        strong_days: int = _STRONG_DAYS,
+    ) -> None:
         self._path = Path(path) if path else _project_path()
+        self._promote_days = max(2, int(promote_days))
+        self._push_days = max(self._promote_days, int(push_days))
+        self._strong_days = max(self._push_days, int(strong_days))
 
     def load(self) -> Dict[str, Any]:
         try:
@@ -100,7 +113,10 @@ class ScreenerPoolService:
             if item.get("symbol")
         ]
         today_symbols = {str(item["symbol"]).upper() for item in picks}
-        sectors = {str(row.get("symbol")) for row in (result.get("sectors") or [])}
+        sector_ranks = {
+            str(row.get("symbol")): index + 1
+            for index, row in enumerate(result.get("sectors") or [])
+        }
         for item in items.values():
             item["today_selected"] = False
 
@@ -131,12 +147,18 @@ class ScreenerPoolService:
             score_history = score_history[-_MAX_HISTORY:]
 
             fund_trend = _trend(fund_history)
-            sector_ok = str(pick.get("sector_etf")) in sectors
+            sector_etf = str(pick.get("sector_etf") or "")
+            rank_today = sector_ranks.get(sector_etf)
+            sector_history = list(existing.get("sector_rank_history") or [])
+            sector_history.append(rank_today or 0)
+            sector_history = sector_history[-_MAX_HISTORY:]
+            recent_ranks = sector_history[-_SECTOR_WINDOW:]
+            sector_ok = sum(1 for rank in recent_ranks if rank > 0) >= _SECTOR_MIN_DAYS
             rs_ok = float(pick.get("rs_15d") or 0) > 0
             risk = str(pick.get("risk_level") or "low")
             previous_stage = str(existing.get("stage") or "")
             ready = (
-                consecutive >= _READY_DAYS
+                consecutive >= self._promote_days
                 and sector_ok
                 and rs_ok
                 and fund_trend != "worsening"
@@ -150,6 +172,7 @@ class ScreenerPoolService:
                 stage = "watching"
             else:
                 stage = "new"
+            strong = ready and consecutive >= self._strong_days
             promoted_today = stage in ("ready", "trigger") and previous_stage not in ("ready", "trigger")
 
             items[symbol] = {
@@ -166,6 +189,9 @@ class ScreenerPoolService:
                 "stage": stage,
                 "stage_changed": stage != previous_stage,
                 "promoted_today": promoted_today,
+                "strong": strong,
+                "sector_rank_today": rank_today,
+                "sector_rank_history": sector_history,
                 "last_score": pick.get("score"),
                 "score_history": score_history,
                 "fundamental_score": fund_score if fund_score is not None else existing.get("fundamental_score"),
@@ -268,7 +294,9 @@ class ScreenerPoolService:
         items = list((pool.get("items") or {}).values())
         promoted = [
             item for item in items
-            if item.get("promoted_today") and item.get("stage") in ("ready", "trigger")
+            if item.get("promoted_today")
+            and item.get("stage") in ("ready", "trigger")
+            and int(item.get("consecutive_days") or 0) >= self._push_days
         ]
         promoted.sort(
             key=lambda item: (
@@ -324,12 +352,15 @@ class ScreenerPoolService:
             "unknown": "数据不足",
         }
         for item in items[:limit]:
+            stage_label = labels.get(str(item.get("stage")), item.get("stage"))
+            if item.get("strong") and stage_label in ("买入候选", "触发买入"):
+                stage_label = f"强确认/{stage_label}"
             lines.append(
                 f"| {item.get('symbol')} | {item.get('name') or ''} | "
                 f"{item.get('consecutive_days')} | "
                 f"{'是' if item.get('today_selected') else '否'} | "
                 f"{trend_labels.get(str(item.get('fundamental_trend')), '--')} | "
-                f"{labels.get(str(item.get('stage')), item.get('stage'))} | "
+                f"{stage_label} | "
                 f"{item.get('sector_name') or ''} |"
             )
         return "\n".join(lines)
@@ -344,7 +375,21 @@ class ScreenerPoolService:
             logger.debug("[候选池] 写入失败: %s", exc)
 
 
-_POOL = ScreenerPoolService()
+def _build_pool() -> ScreenerPoolService:
+    try:
+        from src.config import get_config
+
+        config = get_config()
+        return ScreenerPoolService(
+            promote_days=int(getattr(config, "screener_promote_days", _PROMOTE_DAYS)),
+            push_days=int(getattr(config, "screener_push_days", _PUSH_DAYS)),
+            strong_days=int(getattr(config, "screener_strong_days", _STRONG_DAYS)),
+        )
+    except Exception:
+        return ScreenerPoolService()
+
+
+_POOL = _build_pool()
 
 
 def get_screener_pool_service() -> ScreenerPoolService:

@@ -124,6 +124,8 @@ export interface ScreenerPoolItem {
   missingDays?: number;
   todaySelected?: boolean;
   stage?: string;
+  strong?: boolean;
+  sectorRankToday?: number | null;
   lastScore?: number;
   fundamentalScore?: number | null;
   fundamentalTrend?: string;

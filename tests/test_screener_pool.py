@@ -59,8 +59,14 @@ class ScreenerPoolTest(unittest.TestCase):
             service.update(_result(["AAA"]), today="2026-10-29")
             item = service.load()["items"]["AAA"]
             self.assertEqual(item["consecutive_days"], 3)
+            self.assertEqual(item["stage"], "watching")
+
+            service.update(_result(["AAA"]), today="2026-10-30")
+            service.update(_result(["AAA"]), today="2026-10-31")
+            item = service.load()["items"]["AAA"]
+            self.assertEqual(item["consecutive_days"], 5)
             self.assertEqual(item["stage"], "trigger")
-            self.assertEqual(item["fundamental_trend"], "stable")
+            self.assertTrue(item["strong"] is False)
 
     def test_missing_ones_then_dropped(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,12 +108,18 @@ class ScreenerPoolTest(unittest.TestCase):
             self.assertEqual(service.build_notification(service.load()), "")
 
             service.update(_result(["AAA"]), today="2026-10-29")
+            self.assertEqual(service.build_notification(service.load()), "")
+
+            service.update(_result(["AAA"]), today="2026-10-30")
+            self.assertEqual(service.build_notification(service.load()), "")
+
+            service.update(_result(["AAA"]), today="2026-10-31")
             notice = service.build_notification(service.load())
             self.assertIn("股池新晋关注", notice)
             self.assertIn("AAA", notice)
 
             # Same stage tomorrow must not repeat the notification.
-            service.update(_result(["AAA"]), today="2026-10-30")
+            service.update(_result(["AAA"]), today="2026-11-01")
             self.assertEqual(service.build_notification(service.load()), "")
 
     def test_markdown_contains_pool_table(self) -> None:

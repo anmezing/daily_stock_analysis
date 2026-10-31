@@ -250,9 +250,9 @@ const ScreenerPage: React.FC = () => {
                             variant={item.stage === 'trigger' ? 'success' : item.stage === 'ready' ? 'info' : 'warning'}
                           >
                             {item.stage === 'trigger'
-                              ? '触发买入'
+                              ? (item.strong ? '强确认/触发' : '触发买入')
                               : item.stage === 'ready'
-                                ? '买入候选'
+                                ? (item.strong ? '强确认/候选' : '买入候选')
                                 : '继续观察'}
                           </Badge>
                         </td>

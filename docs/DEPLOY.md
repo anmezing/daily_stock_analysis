@@ -258,7 +258,15 @@ docker compose -f docker/docker-compose.server.yml logs -f --tail=100 screener
 ```dotenv
 SCREENER_SCHEDULE_TIME=08:30
 SCREENER_RUN_IMMEDIATELY=false
+SCREENER_PROMOTE_DAYS=5
+SCREENER_PUSH_DAYS=5
+SCREENER_STRONG_DAYS=10
 ```
+
+- `SCREENER_PROMOTE_DAYS=5`：连续在池 5 个交易日才晋级“买入候选”
+- 3 天只算“观察确认”，不推送
+- 10 天标记“强确认”
+- 板块需在最近 5 天里至少 3 天留在 Top 3，避免“个股还在池、板块已退潮”
 
 容器时区是 `America/New_York`，所以 `08:30` 就是美东 08:30。错过时间时，6 小时补跑窗口会自动补一次。
 

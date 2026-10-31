@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Tuple, TYPE_CHECKING
 
 from src.storage import DatabaseManager
+from src.core.trade_plan import render_trade_plan_lines
 from src.utils.data_processing import normalize_model_used, parse_json_field
 
 if TYPE_CHECKING:
@@ -692,6 +693,10 @@ class HistoryService:
                     f"| 🎊 目标位 | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
                     "",
                 ])
+            # 交易计划：什么时候买 / 卖 / 等
+            trade_plan_lines = render_trade_plan_lines(dashboard)
+            if trade_plan_lines:
+                report_lines.extend(trade_plan_lines)
             # 仓位策略
             position = battle.get('position_strategy', {})
             if position:

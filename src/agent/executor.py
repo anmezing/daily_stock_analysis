@@ -74,6 +74,7 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{market_role}投资
 5. **风险优先** — 必须排查以下风险信号：
 {risk_checklist}
 6. **工具失败处理** — 记录失败原因，使用已有数据继续分析，不重复调用失败工具。
+7. **基本面校验** — 使用系统注入的 `fundamental_context`（PE/Forward PE/PB/PS/PEG、利润率、增速、分析师目标价、财报日）判断当前价格是否有业绩支撑；字段缺失就写“数据缺失”，绝不猜数值。
 
 {skills_section}
 
@@ -114,6 +115,13 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{market_role}投资
         }},
         "battle_plan": {{
             "sniper_points": {{"ideal_buy": "", "secondary_buy": "", "stop_loss": "", "take_profit": ""}},
+            "trade_plan": {{
+                "buy_trigger": "<price zone + confirmation signal>",
+                "wait_condition": "<what keeps you waiting / no-chase rule>",
+                "sell_trigger": "<hard stop + trend-invalidation exit + scale-out targets>",
+                "invalidation": "<event/price that proves the thesis wrong>",
+                "time_stop": "<exit if no progress after N trading days>"
+            }},
             "position_strategy": {{"suggested_position": "", "entry_plan": "", "risk_control": ""}},
             "action_checklist": []
         }}
@@ -149,6 +157,7 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{market_role}投资
 3. **精确狙击点**：必须给出具体价格，不说模糊的话
 4. **检查清单可视化**：用 ✅⚠️❌ 明确显示每项检查结果
 5. **风险优先级**：舆情中的风险点要醒目标出
+6. **交易计划可执行**：`trade_plan` 必须写清“什么时候买、什么时候等、什么时候卖”，每个字段都要有价格或可验证信号，禁止“逢低买入”“注意风险”这类空话
 
 {language_section}
 """
@@ -450,6 +459,36 @@ class AgentExecutor:
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
             if context.get("news_context"):
                 parts.append(f"\n[系统已获取的新闻与舆情情报]\n{context['news_context']}")
+            if context.get("trend_result"):
+                parts.append(
+                    f"\n[系统已计算的技术面结果]\n"
+                    f"{json.dumps(context['trend_result'], ensure_ascii=False, default=str)}"
+                )
+            if context.get("fundamental_context"):
+                parts.append(
+                    f"\n[系统已获取的基本面数据]\n"
+                    f"{json.dumps(context['fundamental_context'], ensure_ascii=False, default=str)}"
+                )
+            if context.get("trade_plan_reference"):
+                parts.append(
+                    f"\n[系统按规则推算的参考交易计划（可采纳或说明调整理由）]\n"
+                    f"{json.dumps(context['trade_plan_reference'], ensure_ascii=False, default=str)}"
+                )
+            if context.get("market_themes"):
+                parts.append(
+                    f"\n[当前市场热点与板块轮动]\n"
+                    f"{json.dumps(context['market_themes'], ensure_ascii=False, default=str)}"
+                )
+            if context.get("relative_strength"):
+                parts.append(
+                    f"\n[个股相对基准的强弱]\n"
+                    f"{json.dumps(context['relative_strength'], ensure_ascii=False, default=str)}"
+                )
+            if context.get("market_regime"):
+                parts.append(
+                    f"\n[基准指数状态]\n"
+                    f"{json.dumps(context['market_regime'], ensure_ascii=False, default=str)}"
+                )
 
         parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
         return "\n".join(parts)

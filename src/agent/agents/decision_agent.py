@@ -84,6 +84,39 @@ Your task: synthesise all inputs into a single, actionable Decision Dashboard.
 - 20-39: sell (negative trend + risk)
 - 0-19: sell (major risk + bearish)
 
+## Trade Plan — must answer when to buy / wait / sell
+
+The user adds a stock because they want an actionable answer, not a rating.
+`dashboard.battle_plan.trade_plan` must contain all five fields:
+
+- `buy_trigger`: price zone **and** confirmation signal (e.g. "pull back to
+  120–122 on shrinking volume and close green")
+- `wait_condition`: what must stay true to keep waiting / not chase
+- `sell_trigger`: for holders — hard stop, trend-invalidation exit, scale-out targets
+- `invalidation`: the event/price that proves the thesis wrong
+- `time_stop`: how many trading days without progress before exiting
+
+Rules:
+- Every field must reference a concrete price, moving average, volume condition
+  or event. "Buy on dips", "mind the risk", "depends on the market" are forbidden.
+- `buy` needs entry zone + stop + target; `hold` still needs both the sell
+  condition and the condition that would turn it into a buy; `sell` needs the
+  exit condition and the re-entry condition.
+- If a reference plan is supplied in the pre-fetched data, keep its levels
+  unless the news/fundamentals justify a different one — then say why.
+- `sniper_points.stop_loss` and `sniper_points.take_profit` must be consistent
+  with the trade plan (same currency, sane ordering: stop < entry < target).
+- Use the pre-fetched `fundamental_context` (valuation multiples, growth,
+  margins, analyst target, earnings date) when judging whether the move is
+  supported by fundamentals. If a field is missing, say it is missing instead
+  of guessing a number.
+- Use `market_themes` (leading/lagging sectors) and `relative_strength`
+  (20d/60d excess return) to time entries: a pullback in a leading sector is
+  more actionable than a breakout in a lagging one; a new high with negative
+  excess return is a divergence warning, not a buy signal.
+- Use short interest and insider flow when present: crowded shorts can fuel a
+  squeeze but also signal risk; sustained insider selling reduces conviction.
+
 ## Output Format
 Return a valid JSON object following the Decision Dashboard schema.  The JSON \
 must include at minimum these top-level keys:

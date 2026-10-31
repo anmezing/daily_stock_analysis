@@ -40,8 +40,10 @@ English | [简体中文](../README.md) | [繁體中文](README_CHT.md)
 | Module | Feature | Description |
 |--------|---------|-------------|
 | AI | Decision Dashboard | One-sentence conclusion + precise entry/exit levels + action checklist |
+| AI | Trade Plan | ATR/MA/support-derived "when to buy, wait or sell": entry zone, stop, two targets, risk/reward and time stop; a rule-based plan fills the gaps when the model omits them |
 | Analysis | Multi-dimensional Analysis | Technicals + chip distribution + sentiment + real-time quotes |
 | Market | Global Markets | A-shares, Hong Kong stocks, US stocks |
+| Market | Themes & Relative Strength | Leading/lagging sector ETFs, SPY/QQQ risk-on/off, and 20d/60d excess return versus the benchmark |
 | Search | Smart Autocomplete (MVP) | **[Beta]** Home search supports code/name/pinyin/aliases; the local index now covers A-shares, Hong Kong, and US stocks and can be refreshed from Tushare or AkShare data |
 | Review | Market Review | Daily overview, sectors, northbound capital flow |
 | Intel | Announcement + Capital Flow Intelligence | IntelAgent now also pulls listed-company announcements (SSE/SZSE/CNINFO) and A-share main-force capital flow, and exposes `capital_flow_signal` (`inflow/outflow/neutral/not_available`) for flow direction context |

@@ -574,7 +574,9 @@ class AgentOrchestrator:
             # Pre-populate data fields that the caller already has
             for data_key in ("realtime_quote", "daily_history", "chip_distribution",
                              "trend_result", "news_context", "intel_report",
-                             "intel_dimensions", "market_context", "fundamental_context"):
+                             "intel_dimensions", "market_context", "fundamental_context",
+                             "trade_plan_reference", "market_themes", "relative_strength",
+                             "market_regime"):
                 if context.get(data_key):
                     ctx.set_data(data_key, context[data_key])
 

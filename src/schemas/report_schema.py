@@ -105,10 +105,27 @@ class PositionStrategy(BaseModel):
     risk_control: Optional[str] = None
 
 
+class TradePlan(BaseModel):
+    """Actionable entry/exit plan (when to buy / wait / sell)."""
+
+    buy_trigger: Optional[str] = None
+    wait_condition: Optional[str] = None
+    sell_trigger: Optional[str] = None
+    invalidation: Optional[str] = None
+    time_stop: Optional[str] = None
+    entry_low: Optional[Union[str, int, float]] = None
+    entry_high: Optional[Union[str, int, float]] = None
+    stop_loss: Optional[Union[str, int, float]] = None
+    target_1: Optional[Union[str, int, float]] = None
+    target_2: Optional[Union[str, int, float]] = None
+    risk_reward: Optional[Union[str, int, float]] = None
+
+
 class BattlePlan(BaseModel):
     """Battle plan block."""
 
     sniper_points: Optional[SniperPoints] = None
+    trade_plan: Optional[TradePlan] = None
     position_strategy: Optional[PositionStrategy] = None
     action_checklist: Optional[List[str]] = None
 

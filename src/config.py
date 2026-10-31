@@ -782,9 +782,11 @@ class Config:
     # 全局总开关；关闭时返回 not_supported 并保持主流程无变化
     enable_fundamental_pipeline: bool = True
     # 基本面阶段总预算（秒）
-    fundamental_stage_timeout_seconds: float = 1.5
+    # SEC 的 ticker map + submissions + companyfacts 冷启动约 5 秒，yfinance
+    # 再补 1~2 秒；原来的 1.5s/0.8s 会让美股基本面在真实网络下必然超时。
+    fundamental_stage_timeout_seconds: float = 12.0
     # 单能力源调用超时（秒）
-    fundamental_fetch_timeout_seconds: float = 0.8
+    fundamental_fetch_timeout_seconds: float = 10.0
     # 单能力失败重试次数（已包含首次）
     fundamental_retry_max: int = 1
     # 基本面上下文短 TTL（秒）
@@ -1457,10 +1459,10 @@ class Config:
             circuit_breaker_cooldown=int(os.getenv('CIRCUIT_BREAKER_COOLDOWN', '300')),
             enable_fundamental_pipeline=os.getenv('ENABLE_FUNDAMENTAL_PIPELINE', 'true').lower() == 'true',
             fundamental_stage_timeout_seconds=float(
-                os.getenv('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS', '1.5')
+                os.getenv('FUNDAMENTAL_STAGE_TIMEOUT_SECONDS', '12.0')
             ),
             fundamental_fetch_timeout_seconds=float(
-                os.getenv('FUNDAMENTAL_FETCH_TIMEOUT_SECONDS', '0.8')
+                os.getenv('FUNDAMENTAL_FETCH_TIMEOUT_SECONDS', '10.0')
             ),
             fundamental_retry_max=int(os.getenv('FUNDAMENTAL_RETRY_MAX', '1')),
             fundamental_cache_ttl_seconds=int(os.getenv('FUNDAMENTAL_CACHE_TTL_SECONDS', '120')),
@@ -1958,6 +1960,22 @@ class Config:
                 field="TUSHARE_TOKEN",
             ))
 
+        # --- Fundamental budget (US) ---
+        # SEC 官方接口冷启动约 5 秒；预算太小会让美股基本面静默为空。
+        if (
+            self.enable_fundamental_pipeline
+            and self._needs_us_data_sources()
+            and float(self.fundamental_stage_timeout_seconds) < 8.0
+        ):
+            issues.append(ConfigIssue(
+                severity="warning",
+                message=(
+                    "FUNDAMENTAL_STAGE_TIMEOUT_SECONDS 小于 8 秒：美股 SEC 接口冷启动约 5 秒，"
+                    "基本面（估值/增速/财报日）可能长期为空。建议设为 12，单源超时设为 10。"
+                ),
+                field="FUNDAMENTAL_STAGE_TIMEOUT_SECONDS",
+            ))
+
         # --- Agent pipeline mode ---
         # 配置了具体 skills 时，标准分析链会自动切到 Agent 链（更慢、更耗额度）。
         # 用户以为关掉 AGENT_MODE 就能走标准链，这里显式提示一次。
@@ -2159,6 +2177,21 @@ class Config:
             if part.strip()
         ]
         return "cn" in parts
+
+    def _needs_us_data_sources(self) -> bool:
+        """当前自选股是否包含美股（用于基本面预算提示）。"""
+        for code in (self.stock_list or []):
+            text = str(code).strip().upper()
+            if not text:
+                continue
+            base = text.split(".")[0]
+            if base.isdigit():
+                continue
+            if base.startswith("HK"):
+                continue
+            if len(base) <= 5 and base.isalpha():
+                return True
+        return False
 
     def validate(self) -> List[str]:
         """Return validation messages as plain strings (backward-compatible).

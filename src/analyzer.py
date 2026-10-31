@@ -34,6 +34,7 @@ from src.agent.llm_adapter import get_thinking_extra_body
 from src.config import Config, get_config, get_api_keys_for_model, extra_litellm_params, get_configured_llm_models
 from src.core.llm_rate_limiter import get_llm_rate_limiter, get_rate_limit_bucket
 from src.core.signal_semantics import infer_signal
+from src.core.trade_plan import apply_trade_plan_fallback, build_trade_plan
 from src.core.trading_calendar import get_market_for_stock
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
@@ -843,6 +844,7 @@ class AnalysisResult:
 
     # ========== 元数据 ==========
     market_snapshot: Optional[Dict[str, Any]] = None  # 当日行情快照（展示用）
+    market_themes: Optional[Dict[str, Any]] = None  # 市场热点/板块轮动快照（展示用）
     raw_response: Optional[str] = None  # 原始响应（调试用）
     search_performed: bool = False  # 是否执行了联网搜索
     data_sources: str = ""  # 数据来源说明
@@ -898,6 +900,7 @@ class AnalysisResult:
             'risk_warning': self.risk_warning,
             'buy_reason': self.buy_reason,
             'market_snapshot': self.market_snapshot,
+            'market_themes': self.market_themes,
             'search_performed': self.search_performed,
             'success': self.success,
             'error_message': self.error_message,
@@ -1120,6 +1123,8 @@ class GeminiAnalyzer:
 4. **字段一致性**：`decision_type`、`operation_advice`、`trend_prediction`、`sentiment_score` 必须自洽。多空分歧时统一用 `hold` + `震荡偏多/震荡/震荡偏空` 表达，禁止“看空但买入”这类冲突组合。
 5. **货币单位**：价格使用标的计价货币（美股 USD、港股 HKD、A 股 CNY），不要用“元”统称。
 6. **筹码可能缺失**：未提供筹码分布时，`chip_structure` 整体输出 `null`，且**不得因此下调评分或封顶**。
+7. **必须回答“什么时候买、什么时候卖、什么时候等”**：`battle_plan.trade_plan` 的五个字段不可为空，且必须包含可验证的价格或信号条件。禁止“逢低买入”“注意风险”“视情况而定”这类无法执行的空话。
+8. **买卖计划必须对称**：`buy` 要给出入场区间、止损、目标；`hold` 要写清“什么条件下我会卖出”和“什么条件下才考虑买入”；`sell` 要给出离场条件与重新入场条件。没有这些内容的结论视为不合格。
 
 ## 输出格式：决策仪表盘 JSON
 
@@ -1186,6 +1191,13 @@ class GeminiAnalyzer:
                 "secondary_buy": "次优买入点",
                 "stop_loss": "止损位",
                 "take_profit": "目标位"
+            },
+            "trade_plan": {
+                "buy_trigger": "买入触发条件：必须写清价格区间 + 确认信号（如：回踩 120–122 且缩量收阳）",
+                "wait_condition": "观望条件：什么情况下不买、继续等（如：现价高于 130 不追）",
+                "sell_trigger": "卖出条件：持仓者的止损价、趋势失效信号、分批止盈位",
+                "invalidation": "买入逻辑失效条件：跌破哪个价位 / 出现什么事件就不再持有",
+                "time_stop": "时间止损：持有多少交易日仍不达预期则退出"
             },
             "position_strategy": {
                 "suggested_position": "建议仓位：X成",
@@ -1261,6 +1273,7 @@ class GeminiAnalyzer:
 3. **精确狙击点**：给具体价位；无数据时输出 `null`，不要编造
 4. **检查清单可视化**：用 通过/警示/否决 标注
 5. **风险优先级**：风险点要醒目
+6. **可执行交易计划**：直接回答“现在买 / 等 / 卖”，并给出触发条件、止损、目标、时间止损；`trade_plan` 不是复述结论，而是可照着执行的规则
 """
 
     MARKET_GUIDES = {
@@ -1870,7 +1883,13 @@ class GeminiAnalyzer:
         
         try:
             # 格式化输入（包含技术面数据和新闻）
-            prompt = self._format_prompt(context, name, news_context)
+            # 交易计划只算一次：提示词、占位补全、回测点位都用同一份参考值，
+            # 避免模型给不出价位时报告里出现空字段。
+            analysis_context = dict(context) if isinstance(context, dict) else context
+            trade_plan_reference = build_trade_plan(analysis_context)
+            if isinstance(analysis_context, dict):
+                analysis_context["trade_plan_reference"] = trade_plan_reference
+            prompt = self._format_prompt(analysis_context, name, news_context)
             
             config = get_config()
             model_name = config.litellm_model or "unknown"
@@ -1937,6 +1956,9 @@ class GeminiAnalyzer:
                 result.search_performed = bool(news_context)
                 result.market_snapshot = self._build_market_snapshot(context)
                 result.model_used = model_used
+                # 先用规则计划补齐缺失点位，再做完整性校验：模型没写止损时
+                # 不必为"必填字段"多跑一轮 LLM（规则位本身就是可执行值）。
+                apply_trade_plan_fallback(result, trade_plan_reference)
                 numeric_issues = validate_result_numbers(result, context)
                 result.numeric_issues = numeric_issues
                 result.numeric_consistency = not any(
@@ -1994,6 +2016,10 @@ class GeminiAnalyzer:
 
             persist_llm_usage(llm_usage, model_used, call_type="analysis", stock_code=code)
 
+            # 模型没给价位时，用规则推算的计划补齐；已有内容不覆盖。
+            if result and getattr(result, "success", False):
+                apply_trade_plan_fallback(result, trade_plan_reference)
+
             logger.info(f"[LLM解析] {name}({code}) 分析完成: {result.trend_prediction}, 评分 {result.sentiment_score}")
 
             return result
@@ -2014,6 +2040,54 @@ class GeminiAnalyzer:
                 model_used=None,
             )
     
+    def _format_trade_plan_block(self, context: Dict[str, Any]) -> str:
+        """Render the deterministic reference trade plan for the prompt.
+
+        The model must not invent entry/exit levels from scratch: it gets a
+        rule-derived anchor and either keeps it or explains the deviation.
+        """
+        plan = context.get("trade_plan_reference")
+        if not isinstance(plan, dict) or not plan.get("ready"):
+            plan = build_trade_plan(context)
+            if isinstance(context, dict):
+                context["trade_plan_reference"] = plan
+        if not plan.get("ready"):
+            return ""
+
+        rows = [
+            ("买入触发", plan.get("buy_trigger")),
+            ("观望条件", plan.get("wait_condition")),
+            ("卖出/止损", plan.get("sell_trigger")),
+            ("失效条件", plan.get("invalidation")),
+            ("时间止损", plan.get("time_stop")),
+        ]
+        table = "\n".join(
+            f"| {label} | {text} |"
+            for label, text in rows
+            if text
+        )
+        levels = []
+        for label, key in (("入场区间", "entry_low"), ("止损", "stop_loss"), ("目标1", "target_1"), ("目标2", "target_2")):
+            value = plan.get(key)
+            if value is not None:
+                levels.append(f"{label}={value}")
+        level_text = " | ".join(levels)
+        basis = str(plan.get("basis") or "").strip()
+        return f"""
+### 系统参考交易计划（规则推算，仅作价位锚点）
+> 由 ATR14、均线与近 20 日高低点算出，不是最终结论。你要么采纳，要么在 `trade_plan` 里说明为什么调整。
+> {level_text}{(' | ' + basis) if basis else ''}
+
+| 场景 | 参考规则 |
+|------|----------|
+{table}
+
+**硬性要求**：
+- 输出的 `dashboard.battle_plan.trade_plan` 必须包含 `buy_trigger` / `wait_condition` / `sell_trigger` / `invalidation` / `time_stop`；
+- 每个字段都要有价格或可验证信号，不能写“逢低”“注意风险”；
+- 若你判断当前应观望，也必须写清“什么价格/什么信号出现才转为买入”。
+"""
+
     def _format_fundamental_block(self, context: Dict[str, Any]) -> str:
         """把基本面聚合结果渲染成提示词表格。
 
@@ -2034,6 +2108,7 @@ class GeminiAnalyzer:
         growth = _data('growth')
         earnings = _data('earnings')
         institution = _data('institution')
+        valuation = _data('valuation')
 
         rows: List[str] = []
 
@@ -2051,12 +2126,48 @@ class GeminiAnalyzer:
         _add('净利润同比', growth.get('net_profit_yoy'), self._format_signed_percent)
         _add('ROE', growth.get('roe'), self._format_percent)
         _add('毛利率', growth.get('gross_margin'), self._format_percent)
+        _add('营业利润率', growth.get('operating_margin'), self._format_percent)
+        _add('净利率', growth.get('profit_margin'), self._format_percent)
+        _add('PE(TTM)', valuation.get('pe_ratio'), lambda v: f"{float(v):.2f}")
+        _add('Forward PE', valuation.get('forward_pe'), lambda v: f"{float(v):.2f}")
+        _add('PB', valuation.get('pb_ratio'), lambda v: f"{float(v):.2f}")
+        _add('PS(TTM)', valuation.get('ps_ratio'), lambda v: f"{float(v):.2f}")
+        _add('PEG', valuation.get('peg_ratio'), lambda v: f"{float(v):.2f}")
+        _add('EV/EBITDA', valuation.get('ev_to_ebitda'), lambda v: f"{float(v):.2f}")
+        _add('总市值', valuation.get('market_cap'), self._format_compact_money)
+        _add('自由现金流', institution.get('free_cashflow'), self._format_compact_money)
         _add('机构持股比例', institution.get('institutional_holding_pct'), self._format_percent)
         _add('分析师覆盖数', institution.get('analyst_coverage_count'), lambda v: f"{float(v):.0f}")
         _add('分析师目标均价', institution.get('target_mean_price'), self._format_price)
         _add('分析师共识', institution.get('recommendation_key'), lambda v: str(v))
         _add('近90天内部人申报(Form 4)', institution.get('insider_form4_count_90d'), lambda v: f"{int(v)} 笔")
         _add('近180天举牌/持股披露', institution.get('ownership_disclosure_count_180d'), lambda v: f"{int(v)} 笔")
+        _add('Beta', institution.get('beta'), lambda v: f"{float(v):.2f}")
+        _add('行业', (
+            institution.get('sector'),
+            institution.get('industry'),
+        ) if institution.get('sector') or institution.get('industry') else None,
+            lambda v: " / ".join(str(item) for item in v if item))
+        _add('空头占流通股', institution.get('short_percent_float'), self._format_percent)
+        _add('空头回补天数', institution.get('short_ratio_days'), lambda v: f"{float(v):.2f} 天")
+        _add('空头数据日期', institution.get('short_interest_date'), lambda v: str(v))
+        _add('空头股数环比', institution.get('short_change_pct'), self._format_signed_percent)
+        _add('近90天内部人买入', institution.get('insider_buy_count_90d'), lambda v: f"{int(v)} 笔")
+        _add('近90天内部人卖出', institution.get('insider_sell_count_90d'), lambda v: f"{int(v)} 笔")
+        _add('内部人净买入额(90天, 负=净卖出)', institution.get('insider_net_value_90d'), self._format_compact_money)
+        _add('流通股本', institution.get('float_shares'), self._format_compact_money)
+        _add('52周高/低', (
+            institution.get('week52_high'),
+            institution.get('week52_low'),
+        ) if institution.get('week52_high') is not None and institution.get('week52_low') is not None else None,
+            lambda v: f"{float(v[0]):.2f} / {float(v[1]):.2f}")
+        _add('负债权益比', institution.get('debt_to_equity'), lambda v: f"{float(v):.1f}%")
+        _add('流动比率', institution.get('current_ratio'), lambda v: f"{float(v):.2f}")
+        _add('EPS(TTM/Forward)', (
+            earnings.get('eps_trailing'),
+            earnings.get('eps_forward'),
+        ) if earnings.get('eps_trailing') is not None and earnings.get('eps_forward') is not None else None,
+            lambda v: f"{float(v[0]):.2f} / {float(v[1]):.2f}")
         _add('最近财报', earnings.get('latest_filing_form'), lambda v: str(v))
         _add('最近财报日期', earnings.get('latest_filing_date'), lambda v: str(v))
         _add('下次财报日', earnings.get('earnings_date'), lambda v: str(v))
@@ -2103,6 +2214,8 @@ class GeminiAnalyzer:
         today = context.get('today', {})
         market_context_block = self._build_market_context_block(context)
         regime_block = self._build_market_regime_block(context)
+        market_themes_block = self._build_market_themes_block(context)
+        relative_strength_block = self._build_relative_strength_block(context)
         
         # Determine currency label based on market
         market = self._resolve_market_context(context).get("market", "cn")
@@ -2130,6 +2243,10 @@ class GeminiAnalyzer:
 {market_context_block}
 
 {regime_block}
+
+{market_themes_block}
+
+{relative_strength_block}
 
 ---
 
@@ -2163,15 +2280,22 @@ class GeminiAnalyzer:
         if 'realtime' in context:
             rt = context['realtime']
             session_label = context.get('session_label', '')
+            raw_volume_ratio = rt.get('volume_ratio')
+            if raw_volume_ratio is None and context.get('is_intraday'):
+                volume_ratio_text = "N/A（盘中累计量，待收盘确认）"
+            elif raw_volume_ratio is None:
+                volume_ratio_text = "N/A"
+            else:
+                volume_ratio_text = self._display_optional(raw_volume_ratio)
             prompt += f"""
 ### 实时行情增强数据
 > **数据时效**：{session_label}
-> 说明：上方行情行若标注为"最新价"，是分析时点的最新成交价，不是当日收盘价；盘中价格还会变化，不要把它当成已确认的收盘/突破。量比、换手率为数据源口径，成交量若标注"盘中累计"则不可与全天均量直接比较。
+> 说明：上方行情行若标注为"最新价"，是分析时点的最新成交价，不是当日收盘价；盘中价格还会变化，不要把它当成已确认的收盘/突破。量比已按已开市分钟数归一化；换手率为数据源口径；成交量若标注"盘中累计"则不可与全天均量直接比较。
 
 | 指标 | 数值 | 解读 |
 |------|------|------|
 | 当前价格 | {self._format_price(rt.get('price'))} {currency} | |
-| **量比** | **{self._display_optional(rt.get('volume_ratio'))}** | {rt.get('volume_ratio_desc', '')} |
+| **量比** | **{volume_ratio_text}** | {rt.get('volume_ratio_desc', '')} |
 | **换手率** | **{self._format_percent(rt.get('turnover_rate'))}** | |
 | 市盈率(动态) | {self._display_optional(rt.get('pe_ratio'))} | |
 | 市净率 | {self._display_optional(rt.get('pb_ratio'))} | |
@@ -2247,6 +2371,7 @@ class GeminiAnalyzer:
 | **乖离率(MA5)** | **{self._format_signed_percent(trend.get('bias_ma5'))}** | {bias_warning} |
 | 乖离率(MA10) | {self._format_signed_percent(trend.get('bias_ma10'))} | |
 | 量能状态 | {self._display_optional(trend.get('volume_status'), '未知')} | {trend.get('volume_trend', '')} |
+| 5日量比（日K） | {self._format_volume_ratio_5d(trend.get('volume_ratio_5d'), context)} | 收盘后口径；盘中累计量不可直接与全天均量比较 |
 | 系统信号 | {self._display_optional(trend.get('buy_signal'), '未知')} | |
 | 系统评分 | {self._display_optional(trend.get('signal_score'))}/100 | |
 
@@ -2260,6 +2385,9 @@ class GeminiAnalyzer:
 
         # 基本面聚合结果（若数据源有返回）
         prompt += self._format_fundamental_block(context)
+
+        # 系统参考交易计划（规则推算，给出可执行的价位锚点）
+        prompt += self._format_trade_plan_block(context)
         
         # 添加昨日对比数据
         if 'yesterday' in context:
@@ -2420,6 +2548,40 @@ class GeminiAnalyzer:
         else:
             return f"{amount:.0f} {currency}"
 
+    def _format_compact_money(self, value: Optional[float]) -> str:
+        """Compact money display for fundamentals (market-neutral units)."""
+        if value is None:
+            return 'N/A'
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return 'N/A'
+        if math.isnan(amount) or math.isinf(amount):
+            return 'N/A'
+        sign = "-" if amount < 0 else ""
+        amount = abs(amount)
+        if amount >= 1e12:
+            return f"{sign}{amount / 1e12:.2f}T"
+        if amount >= 1e9:
+            return f"{sign}{amount / 1e9:.2f}B"
+        if amount >= 1e6:
+            return f"{sign}{amount / 1e6:.2f}M"
+        if amount >= 1e3:
+            return f"{sign}{amount / 1e3:.2f}K"
+        return f"{sign}{amount:.0f}"
+
+    def _format_volume_ratio_5d(self, value: Optional[float], context: Dict[str, Any]) -> str:
+        """5-day volume ratio is a full-day metric; intraday it is misleading."""
+        if isinstance(context, dict) and context.get("is_intraday"):
+            return "盘中待收盘确认"
+        try:
+            ratio = float(value) if value is not None else None
+        except (TypeError, ValueError):
+            ratio = None
+        if ratio is None or ratio <= 0:
+            return "N/A"
+        return f"{ratio:.2f}"
+
     def _format_percent(self, value: Optional[float]) -> str:
         """格式化百分比显示"""
         if value is None:
@@ -2544,6 +2706,83 @@ class GeminiAnalyzer:
             lines.append(f"- 判定依据：{china_exposure.get('reasoning', '未提供')}")
         return "\n".join(lines)
 
+    def _build_market_themes_block(self, context: Dict[str, Any]) -> str:
+        """Render the market-theme / sector-rotation snapshot for the prompt."""
+        themes = context.get("market_themes")
+        if not isinstance(themes, dict) or themes.get("status") not in ("ok", "partial"):
+            return ""
+
+        def _fmt(value: Any) -> str:
+            return "N/A" if value is None else f"{float(value):+.2f}%"
+
+        lines = ["## 当前市场热点与板块轮动（日线，15 分钟缓存）"]
+        for row in themes.get("benchmarks") or []:
+            position = []
+            if row.get("above_ma50") is not None:
+                position.append("MA50 上方" if row.get("above_ma50") else "MA50 下方")
+            if row.get("above_ma200") is not None:
+                position.append("MA200 上方" if row.get("above_ma200") else "MA200 下方")
+            lines.append(
+                f"- 基准 {row.get('name')}({row.get('symbol')})："
+                f"1日 {_fmt(row.get('return_1d'))} | 5日 {_fmt(row.get('return_5d'))} | "
+                f"20日 {_fmt(row.get('return_20d'))}"
+                + (f" | {'、'.join(position)}" if position else "")
+            )
+
+        def _row_text(rows: Any) -> str:
+            parts = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                parts.append(
+                    f"{row.get('name')} {row.get('symbol')} "
+                    f"5日 {_fmt(row.get('return_5d'))}（1日 {_fmt(row.get('return_1d'))}）"
+                )
+            return "、".join(parts)
+
+        leaders = _row_text(themes.get("leaders"))
+        laggards = _row_text(themes.get("laggards"))
+        if leaders:
+            lines.append(f"- 领涨板块：{leaders}")
+        if laggards:
+            lines.append(f"- 领跌板块：{laggards}")
+        lines.append(
+            f"- 市场状态：{'risk-on' if themes.get('risk_on') else 'risk-off / 震荡'}"
+        )
+        lines.append(
+            "- 使用方式：个股属于领涨板块时，回踩支撑可更积极；属于领跌板块时，"
+            "突破必须同时满足放量与相对强弱转正，不能只因为个股均线好看就追。"
+        )
+        return "\n".join(lines)
+
+    def _build_relative_strength_block(self, context: Dict[str, Any]) -> str:
+        """Render 20d/60d excess return versus the benchmark."""
+        rs = context.get("relative_strength")
+        if not isinstance(rs, dict) or not rs:
+            return ""
+
+        def _fmt(value: Any) -> str:
+            return "N/A" if value is None else f"{float(value):+.2f}%"
+
+        lines = [f"## 相对强弱（个股 vs {rs.get('benchmark') or '基准'}）"]
+        lines.append(
+            f"- 20日：个股 {_fmt(rs.get('stock_return_20d'))} | "
+            f"基准 {_fmt(rs.get('benchmark_return_20d'))} | "
+            f"超额 {_fmt(rs.get('excess_20d'))}"
+        )
+        if rs.get("stock_return_60d") is not None or rs.get("excess_60d") is not None:
+            lines.append(
+                f"- 60日：个股 {_fmt(rs.get('stock_return_60d'))} | "
+                f"基准 {_fmt(rs.get('benchmark_return_60d'))} | "
+                f"超额 {_fmt(rs.get('excess_60d'))}"
+            )
+        if rs.get("label"):
+            lines.append(f"- 判定：{rs.get('label')}")
+        lines.append(
+            "- 使用方式：超额为正且扩大 → 趋势可延续；价格新高但超额转负 → 警惕背离，追高需谨慎。"
+        )
+        return "\n".join(lines)
+
     def _build_market_focus_questions(self, context: Dict[str, Any]) -> str:
         """Return market-aware checklist questions for the LLM."""
         market = self._resolve_market_context(context).get("market", "cn")
@@ -2553,14 +2792,18 @@ class GeminiAnalyzer:
 2. `China exposure` 是高/中/低？中国政策是否应该成为核心因子，还是只能低权重引用？
 3. 是否存在 insider selling、诉讼、监管调查、short interest 或 put/call 异动？
 4. 估值与业绩增速是否匹配？消息面会不会改变估值锚？
-5. 技术面是否支持趋势跟踪、breakout retest、earnings gap hold 或回踩再进？不要机械套用 A股 MA5/MA10 模式。"""
+5. 技术面是否支持趋势跟踪、breakout retest、earnings gap hold 或回踩再进？不要机械套用 A股 MA5/MA10 模式。
+6. **财报窗口**：下次财报日是否在 3 个交易日内？若是，是否应该等财报后再买 / 降低仓位？
+7. **现在到底该买、该等、还是该卖？** 写出触发价格/信号；如果结论是持有或观望，必须写清“什么条件下卖出、什么条件下加仓”。"""
         if market == "hk":
             return """### 重点关注（必须明确回答）：
 1. HKEX 公告里是否有业绩、profit warning、配股、回购或分红等关键事项？
 2. 公司对内地业务/客户/资产是否敏感？内地政策该给多高权重？
 3. 是否存在融资摊薄、诉讼调查或明显的盈利下修风险？
 4. 行业景气、南向资金和估值是否支持当前仓位判断？
-5. 技术面是否支持区间突破、公告确认位、均线支撑或回测再进？不要机械套用 A股 MA5/MA10 模式。"""
+5. 技术面是否支持区间突破、公告确认位、均线支撑或回测再进？不要机械套用 A股 MA5/MA10 模式。
+6. **公告窗口**：业绩公告/财报日是否在 3 个交易日内？若是，是否应等公告后再建仓？
+7. **现在到底该买、该等、还是该卖？** 写出触发价格/信号；如果结论是持有或观望，必须写清“什么条件下卖出、什么条件下加仓”。"""
         return """### 重点关注（必须明确回答）：
 1. 是否满足 MA5>MA10>MA20 多头排列？
 2. 当前乖离率是否在安全范围内（<5%）？超过5%必须标注“严禁追高”
@@ -2568,7 +2811,8 @@ class GeminiAnalyzer:
 4. 筹码结构是否健康？
 5. 消息面有无重大利空？（减持、处罚、业绩变脸、政策利空等）
 6. 是否存在涨停/交易约束/T+1 等执行层限制，导致“理论买点”在实盘中未必可成交？
-7. 是否为特殊交易规则股票？ST股涨跌停 ±5%，科创板/创业板 ±20%，北交所 ±30%——乖离率阈值需相应调整。"""
+7. 是否为特殊交易规则股票？ST股涨跌停 ±5%，科创板/创业板 ±20%，北交所 ±30%——乖离率阈值需相应调整。
+8. **现在到底该买、该等、还是该卖？** 写出触发价格/信号；如果结论是持有或观望，必须写清“什么条件下卖出、什么条件下加仓”。"""
 
     def _build_market_snapshot(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """构建当日行情快照（展示用）"""

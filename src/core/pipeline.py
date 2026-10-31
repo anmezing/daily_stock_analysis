@@ -40,7 +40,10 @@ from src.services.analysis_calibration_service import AnalysisCalibrationService
 from src.services.benchmark_service import BenchmarkService
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
+from src.core.relative_strength import compute_relative_strength
+from src.core.trade_plan import apply_trade_plan_fallback, build_trade_plan
 from src.core.trading_calendar import get_market_for_stock, get_market_now, get_market_today, is_market_open, get_market_session, get_session_label
+from src.services.market_themes_service import get_market_themes_service
 from bot.models import BotMessage
 
 
@@ -304,7 +307,8 @@ class StockAnalysisPipeline:
 
             # Step 1: 获取实时行情（量比、换手率等）- 使用统一入口，自动故障切换
             realtime_quote = None
-            market_session = get_market_session(get_market_for_stock(code))
+            market = get_market_for_stock(code) or "cn"
+            market_session = get_market_session(market)
             try:
                 realtime_quote = self.fetcher_manager.get_realtime_quote(code)
                 if realtime_quote:
@@ -378,6 +382,30 @@ class StockAnalysisPipeline:
                 )
             except Exception as e:
                 logger.debug(f"{stock_name}({code}) 基本面快照写入失败: {e}")
+
+            # Step 2.6: 市场热点 / 板块轮动（按市场缓存，失败不影响主流程）
+            try:
+                market_themes = get_market_themes_service().get_snapshot(market)
+            except Exception as e:
+                logger.debug(f"{stock_name}({code}) 市场热点获取失败: {e}")
+                market_themes = {"status": "not_supported", "market": market, "reason": str(e)}
+
+            # 基准状态在 Agent / 标准链之前算一次，供两条路径与相对强弱共用
+            analysis_date = get_market_today(market)
+            market_regime: Dict[str, Any] = {}
+            try:
+                if market in ("us", "hk"):
+                    self.benchmark_service.ensure(
+                        market,
+                        analysis_date - timedelta(days=120),
+                        analysis_date,
+                    )
+            except Exception as exc:
+                logger.debug("[%s] 基准数据补齐失败: %s", code, exc)
+            try:
+                market_regime = self.benchmark_service.snapshot(market, analysis_date)
+            except Exception as exc:
+                logger.debug("[%s] 基准状态获取失败: %s", code, exc)
 
             # Step 3: 趋势分析（基于交易理念）— 在 Agent 分支之前执行，供两条路径共用
             trend_result: Optional[TrendAnalysisResult] = None
@@ -484,17 +512,11 @@ class StockAnalysisPipeline:
                     market_context=market_intel_summary,
                     news_context=news_context,
                     intel_results=intel_results,
+                    market_regime=market_regime,
+                    market_themes=market_themes,
                 )
 
             # Step 5: 获取分析上下文（技术面数据 + 历史K线）
-            analysis_date = get_market_today(get_market_for_stock(code))
-            market_regime: Dict[str, Any] = {}
-            try:
-                market_regime = self.benchmark_service.snapshot(
-                    get_market_for_stock(code) or "cn", analysis_date
-                )
-            except Exception as exc:
-                logger.debug("[%s] 基准状态获取失败: %s", code, exc)
             history_days = getattr(self.config, 'analysis_history_days', 60)
             context = self.db.get_analysis_context(code, target_date=analysis_date, history_days=history_days)
             # 分析日期是“这次判断发生在哪一天”；context['date'] 是最后一根 K 线的日期。
@@ -525,10 +547,13 @@ class StockAnalysisPipeline:
                 fundamental_context,
                 market_context=market_intel_summary,
                 market_regime=market_regime,
+                market_themes=market_themes,
             )
             
             # Step 7: 调用 AI 分析（传入增强的上下文和新闻）
             result = self.analyzer.analyze(enhanced_context, news_context=news_context)
+            if result:
+                result.market_themes = market_themes
 
             # Step 7.5: 填充分析时的价格信息到 result
             if result:
@@ -611,6 +636,7 @@ class StockAnalysisPipeline:
         fundamental_context: Optional[Dict[str, Any]] = None,
         market_context: Optional[Dict[str, Any]] = None,
         market_regime: Optional[Dict[str, Any]] = None,
+        market_themes: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         增强分析上下文
@@ -676,6 +702,7 @@ class StockAnalysisPipeline:
                 'bias_ma5': trend_result.bias_ma5,
                 'bias_ma10': trend_result.bias_ma10,
                 'volume_status': trend_result.volume_status.value,
+                'volume_ratio_5d': trend_result.volume_ratio_5d,
                 'volume_trend': trend_result.volume_trend,
                 'buy_signal': trend_result.buy_signal.value,
                 'signal_score': trend_result.signal_score,
@@ -807,6 +834,12 @@ class StockAnalysisPipeline:
             )
         )
 
+        # 市场热点与相对强弱：把"个股 vs 市场"的信息一并喂给模型
+        enhanced["market_themes"] = market_themes if isinstance(market_themes, dict) else {}
+        enhanced["relative_strength"] = self._compute_relative_strength(
+            context, realtime_quote, market_regime
+        )
+
         return enhanced
 
     def _ensure_agent_history(self, code: str, min_days: int = 320) -> None:
@@ -829,6 +862,76 @@ class StockAnalysisPipeline:
         except Exception as e:
             logger.warning("[%s] Agent history prefetch failed: %s", code, e)
 
+    def _load_agent_analysis_context(self, code: str) -> Dict[str, Any]:
+        """Load the 60-day K-line context for the Agent path (fail-open)."""
+        try:
+            from src.services.history_loader import get_frozen_target_date
+
+            target_date = get_frozen_target_date()
+            if target_date is None:
+                target_date = get_market_today(get_market_for_stock(code))
+            raw_context = self.db.get_analysis_context(
+                code,
+                target_date=target_date,
+                history_days=60,
+            )
+            if isinstance(raw_context, dict):
+                return raw_context
+        except Exception as exc:
+            logger.debug("[%s] Agent 分析上下文获取失败: %s", code, exc)
+        return {"code": code}
+
+    def _compute_relative_strength(
+        self,
+        context: Optional[Dict[str, Any]],
+        realtime_quote: Any,
+        market_regime: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Compute 20d/60d excess return versus the market benchmark."""
+        context = context if isinstance(context, dict) else {}
+        regime = market_regime if isinstance(market_regime, dict) else {}
+        today = context.get("today") if isinstance(context.get("today"), dict) else {}
+        close = getattr(realtime_quote, "price", None) if realtime_quote else None
+        if close is None:
+            close = today.get("close")
+        return compute_relative_strength(
+            context.get("history") or [],
+            close,
+            benchmark=str(regime.get("code") or ("SPY" if (get_market_for_stock(context.get("code", "")) == "us") else "benchmark")),
+            benchmark_return_20d=regime.get("return_20d"),
+            benchmark_return_60d=regime.get("return_60d"),
+        )
+
+    def _build_trade_plan_reference(
+        self,
+        code: str,
+        trend_result: Optional[TrendAnalysisResult] = None,
+        realtime_quote: Any = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the rule-derived trade plan used by the Agent path.
+
+        The Agent chain skips ``get_analysis_context`` in the main flow, so we
+        fetch the same 60-day K-line window here to keep entry/stop levels
+        grounded in real data instead of letting the model invent them.
+        """
+        context = dict(context) if isinstance(context, dict) else self._load_agent_analysis_context(code)
+        context.setdefault("code", code)
+        if trend_result is not None:
+            context["trend_analysis"] = {
+                "trend_status": trend_result.trend_status.value,
+                "ma5": trend_result.ma5,
+                "ma10": trend_result.ma10,
+                "ma20": trend_result.ma20,
+                "ma50": trend_result.ma50,
+            }
+        price = getattr(realtime_quote, "price", None) if realtime_quote else None
+        if price:
+            context.setdefault("realtime", {})
+            if isinstance(context["realtime"], dict):
+                context["realtime"]["price"] = price
+        return build_trade_plan(context)
+
     def _analyze_with_agent(
         self, 
         code: str, 
@@ -842,6 +945,8 @@ class StockAnalysisPipeline:
         market_context: Optional[Dict[str, Any]] = None,
         news_context: Optional[str] = None,
         intel_results: Optional[Dict[str, Any]] = None,
+        market_regime: Optional[Dict[str, Any]] = None,
+        market_themes: Optional[Dict[str, Any]] = None,
     ) -> Optional[AnalysisResult]:
         """
         使用 Agent 模式分析单只股票。
@@ -863,6 +968,18 @@ class StockAnalysisPipeline:
                 "analysis_date": get_market_today(get_market_for_stock(code)).isoformat(),
                 "fundamental_context": fundamental_context,
             }
+            agent_analysis_context = self._load_agent_analysis_context(code)
+            trade_plan_reference = self._build_trade_plan_reference(
+                code, trend_result, realtime_quote, context=agent_analysis_context
+            )
+            initial_context["trade_plan_reference"] = trade_plan_reference
+            initial_context["relative_strength"] = self._compute_relative_strength(
+                agent_analysis_context, realtime_quote, market_regime
+            )
+            if isinstance(market_themes, dict) and market_themes:
+                initial_context["market_themes"] = market_themes
+            if isinstance(market_regime, dict) and market_regime:
+                initial_context["market_regime"] = market_regime
             if isinstance(market_context, dict) and market_context:
                 initial_context["market_context"] = market_context
             if news_context:
@@ -908,6 +1025,10 @@ class StockAnalysisPipeline:
             result = self._agent_result_to_analysis_result(agent_result, code, stock_name, report_type, query_id)
             if result:
                 result.query_id = query_id
+                result.market_themes = market_themes if isinstance(market_themes, dict) else None
+                # 模型漏掉的入场/止损/卖出条件用规则计划补齐，保证报告和回测都有可执行点位
+                if result.success:
+                    apply_trade_plan_fallback(result, trade_plan_reference)
             # Agent weak integrity: placeholder fill only, no LLM retry
             # 只有拿到模型结论时才做完整性补全：失败结果本来就不入库，
             # 再补一遍占位只会让日志出现"必填字段缺失"的假象。

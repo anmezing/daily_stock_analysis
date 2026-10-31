@@ -36,8 +36,10 @@
 | 模块 | 功能 | 说明 |
 |------|------|------|
 | AI | 决策仪表盘 | 一句话核心结论 + 精确买卖点位 + 操作检查清单 |
+| AI | 交易计划 | 用 ATR/均线/支撑压力推算“什么时候买、什么时候等、什么时候卖”，输出买入区间、止损、两档目标、盈亏比与时间止损，模型漏写时由规则计划补齐 |
 | 分析 | 多维度分析 | 技术面（盘中实时 MA/多头排列）+ 筹码分布 + 舆情情报 + 实时行情 |
 | 市场 | 全球市场 | 支持 A股、港股、美股及美股指数（SPX、DJI、IXIC 等） |
+| 市场 | 热点与相对强弱 | 11 个行业 ETF 的领涨/领跌、SPY/QQQ risk-on/off，以及个股 20/60 日相对基准的超额收益 |
 | 基本面 | 结构化聚合 | 新增 `fundamental_context`（valuation/growth/earnings/institution/capital_flow/dragon_tiger/boards，其中 `earnings.data` 新增 `financial_report` 与 `dividend`，`boards` 表示板块涨跌榜），主链路 fail-open 降级 |
 | 策略 | 市场策略系统 | 内置 A股「三段式复盘策略」与美股「Regime Strategy」，输出进攻/均衡/防守或 risk-on/neutral/risk-off 计划，并附“仅供参考，不构成投资建议”提示 |
 | 复盘 | 大盘复盘 | 每日市场概览、板块涨跌；支持 cn(A股)/us(美股)/both(两者) 切换 |

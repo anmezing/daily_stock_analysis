@@ -30,6 +30,8 @@ from .fundamental_adapter import (
     AkshareFundamentalAdapter,
     HkYfinanceFundamentalAdapter,
     UsSecFundamentalAdapter,
+    UsYfinanceFundamentalAdapter,
+    merge_fundamental_bundles,
 )
 
 # 配置日志
@@ -536,6 +538,7 @@ class DataFetcherManager:
         self._fundamental_adapter = AkshareFundamentalAdapter()
         self._hk_fundamental_adapter = HkYfinanceFundamentalAdapter()
         self._us_fundamental_adapter = UsSecFundamentalAdapter()
+        self._us_yfinance_adapter = UsYfinanceFundamentalAdapter()
         self._fundamental_cache: Dict[str, Dict[str, Any]] = {}
         self._fundamental_cache_lock = RLock()
         self._fundamental_timeout_worker_limit = 8
@@ -2323,6 +2326,27 @@ class DataFetcherManager:
                 else:
                     bundle_status = str(bundle_payload.get("status", "not_supported"))
                     bundle_errors = [bundle_err_msg] if bundle_err_msg else []
+
+                # SEC gives filings + reported growth, but no valuation multiples.
+                # yfinance fills PE/PS/PEG/margins/analyst targets.  Only spend the
+                # extra call when there is real budget left, or when SEC failed.
+                should_enrich = (
+                    bundle_status not in ("ok", "partial")
+                    or remaining_seconds >= 2.0
+                )
+                if should_enrich and remaining_seconds > 0.5:
+                    yf_payload, yf_err, yf_ms = self._run_with_retry(
+                        lambda: self._us_yfinance_adapter.get_fundamental_bundle(stock_code),
+                        min(fetch_timeout, remaining_seconds),
+                        "us_yfinance_fundamental_bundle",
+                    )
+                    _consume_budget(yf_ms)
+                    bundle_ms += yf_ms
+                    if isinstance(yf_payload, dict):
+                        bundle_payload = merge_fundamental_bundles(bundle_payload, yf_payload)
+                        bundle_status = str(bundle_payload.get("status") or bundle_status)
+                    if yf_err:
+                        bundle_errors.append(yf_err)
             else:
                 bundle_provider_name = "hk_fundamental_bundle"
                 bundle_payload, bundle_err_msg, bundle_ms = self._run_with_retry(
@@ -2357,6 +2381,21 @@ class DataFetcherManager:
         institution_payload = bundle_payload.get("institution", {}) if isinstance(bundle_payload, dict) else {}
         adapter_errors = list(bundle_payload.get("errors", [])) if isinstance(bundle_payload, dict) else []
         adapter_errors.extend(bundle_errors)
+
+        # 把 yfinance 的估值倍数补进 valuation 块：美股实时行情通常没有 PE/PB，
+        # 只靠 realtime_quote 会让提示词里的"估值"一栏长期为空。
+        bundle_valuation = bundle_payload.get("valuation", {}) if isinstance(bundle_payload, dict) else {}
+        if isinstance(bundle_valuation, dict) and bundle_valuation:
+            valuation_block = result_ctx.get("valuation") or {}
+            valuation_data = dict(valuation_block.get("data") or {})
+            for key, value in bundle_valuation.items():
+                if valuation_data.get(key) is None and value is not None:
+                    valuation_data[key] = value
+            valuation_block["data"] = valuation_data
+            if self._has_meaningful_payload(valuation_data):
+                valuation_block["status"] = "ok"
+                valuation_block["coverage"] = {"status": "ok"}
+            result_ctx["valuation"] = valuation_block
 
         growth_status = self._infer_block_status(growth_payload, bundle_status)
         earnings_status = self._infer_block_status(earnings_payload, bundle_status)
@@ -2434,6 +2473,21 @@ class DataFetcherManager:
             "boards": result_ctx["boards"].get("status", "not_supported"),
         }
         result_ctx["coverage"] = block_statuses
+        logger.info(
+            "[基本面] %s(%s) coverage=%s",
+            stock_code,
+            market,
+            block_statuses,
+        )
+        if market == "us" and not any(
+            block_statuses.get(block) in ("ok", "partial")
+            for block in ("valuation", "growth", "earnings", "institution")
+        ):
+            logger.warning(
+                "[基本面] %s 美股基本面全部为空（SEC/yfinance 均失败或超时）；"
+                "请检查 FUNDAMENTAL_STAGE_TIMEOUT_SECONDS / FUNDAMENTAL_FETCH_TIMEOUT_SECONDS 与网络",
+                stock_code,
+            )
         for block in (
             "valuation",
             "growth",

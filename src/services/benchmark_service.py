@@ -170,11 +170,22 @@ class BenchmarkService:
         recent_vol = (
             sum(value * value for value in returns[-10:]) / len(returns[-10:])
         ) ** 0.5 if len(returns) >= 10 else None
+
+        def _return_over(days: int):
+            if len(closes) <= days:
+                return None
+            base = closes[-1 - days]
+            if base <= 0:
+                return None
+            return round((closes[-1] / base - 1) * 100, 2)
+
         return {
             "code": self.code_for(market),
             "close": round(last, 4),
             "ma200": round(ma200, 4) if ma200 else None,
             "above_ma200": bool(ma200 and last >= ma200),
+            "return_20d": _return_over(20),
+            "return_60d": _return_over(60),
             "volatility_20d_pct": round(volatility, 3) if volatility is not None else None,
             "recent_volatility_pct": round(recent_vol, 3) if recent_vol is not None else None,
             "risk_on": bool(ma200 and last >= ma200),

@@ -36,6 +36,9 @@ from .us_index_mapping import is_us_stock_code
 
 logger = logging.getLogger(__name__)
 
+# Regular-session length used to normalise an intraday volume ratio.
+_SESSION_MINUTES = {"us": 390, "hk": 390, "cn": 330}
+
 
 class TwelveDataPlanError(DataSourceUnavailableError):
     """当前套餐无权限访问该接口（401/403 等），重试没有意义。"""
@@ -516,18 +519,91 @@ class TwelveDataFetcher(BaseFetcher):
         except ValueError:
             return raw[:10] if len(raw) >= 10 else None
 
+    @staticmethod
+    def _elapsed_session_minutes(
+        market: str,
+        quote_timestamp: Optional[float] = None,
+        now: Optional[datetime] = None,
+    ) -> Optional[int]:
+        """Minutes elapsed in the regular session for the quote's timestamp.
+
+        Returns ``None`` outside regular trading (pre-market / after close /
+        stale quote), which tells the caller to fall back to a full-day ratio.
+        """
+        try:
+            from zoneinfo import ZoneInfo
+
+            from src.core.trading_calendar import MARKET_TIMEZONE
+
+            market = (market or "").strip().lower()
+            tz_name = MARKET_TIMEZONE.get(market)
+            if not tz_name:
+                return None
+            tz = ZoneInfo(tz_name)
+            current = now or datetime.now(tz)
+            quote_dt = (
+                datetime.fromtimestamp(float(quote_timestamp), tz)
+                if quote_timestamp
+                else current
+            )
+            if quote_dt.date() != current.date():
+                return None
+            open_dt = quote_dt.replace(hour=9, minute=30, second=0, microsecond=0)
+            elapsed = int((quote_dt - open_dt).total_seconds() // 60)
+            total = _SESSION_MINUTES.get(market, 390)
+            if elapsed <= 0 or elapsed >= total:
+                return None
+            return elapsed
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_volume_ratio(
+        current_volume: Optional[float],
+        avg_daily_volume: Optional[float],
+        elapsed_minutes: Optional[int] = None,
+        total_minutes: int = 390,
+    ) -> Optional[float]:
+        """Volume ratio with intraday time normalisation.
+
+        The raw ``current/5-day-average`` comparison is structurally understated
+        during the session: at 10:00 ET only ~30 of 390 minutes have traded, so
+        a normal session looks like extreme low volume.  Divide by the elapsed
+        fraction first, then sanity-check the result.
+        """
+        try:
+            volume = float(current_volume or 0)
+            average = float(avg_daily_volume or 0)
+        except (TypeError, ValueError):
+            return None
+        if volume <= 0 or average <= 0:
+            return None
+
+        if elapsed_minutes and 0 < int(elapsed_minutes) < total_minutes:
+            expected = average * (float(elapsed_minutes) / float(total_minutes))
+        else:
+            expected = average
+        if expected <= 0:
+            return None
+
+        ratio = volume / expected
+        # 0.0041 (your US intraday log) is a unit/口径 bug, not a tradable signal.
+        if ratio <= 0.02 or ratio >= 20.0:
+            return None
+        return round(ratio, 4)
+
     def _compute_volume_ratio(
         self,
         symbol: str,
         current_volume: Optional[int],
         *,
         current_date: Optional[str] = None,
+        elapsed_minutes: Optional[int] = None,
     ) -> Optional[float]:
         """Compute volume_ratio as current volume / previous 5 daily average volume.
 
-        This mirrors the repository-wide volume_ratio semantics used for other
-        providers: compare today's/live volume against the latest five completed
-        daily bars, excluding the current session when present.
+        Mirrors the repository-wide volume_ratio semantics used for other
+        providers, with an intraday time adjustment for US/HK sessions.
         """
         if not current_volume or current_volume <= 0:
             return None
@@ -573,7 +649,20 @@ class TwelveDataFetcher(BaseFetcher):
         avg_volume = sum(historical_volumes) / len(historical_volumes)
         if avg_volume <= 0:
             return None
-        return round(float(current_volume) / avg_volume, 4)
+        ratio = self._normalize_volume_ratio(
+            current_volume,
+            avg_volume,
+            elapsed_minutes=elapsed_minutes,
+        )
+        if ratio is None:
+            logger.debug(
+                "[TwelveDataFetcher] 量比超出合理范围，已丢弃(symbol=%s, volume=%s, avg=%s, elapsed=%s)",
+                symbol,
+                current_volume,
+                round(avg_volume),
+                elapsed_minutes,
+            )
+        return ratio
 
     def _compute_turnover_rate(self, symbol: str, current_volume: Optional[int]) -> Optional[float]:
         """Compute turnover_rate from Twelve Data statistics when plan allows it.
@@ -652,10 +741,20 @@ class TwelveDataFetcher(BaseFetcher):
             amplitude = round((high - low) / previous_close * 100, 4)
 
         current_date = self._parse_date_token(payload.get("datetime")) if isinstance(payload, dict) else None
+        market = "us"
+        try:
+            from src.core.trading_calendar import get_market_for_stock
+
+            market = get_market_for_stock(normalized) or "us"
+        except Exception:
+            market = "us"
+        quote_timestamp = safe_float(payload.get("timestamp")) if isinstance(payload, dict) else None
+        elapsed_minutes = self._elapsed_session_minutes(market, quote_timestamp)
         volume_ratio = self._compute_volume_ratio(
             symbol,
             current_volume,
             current_date=current_date,
+            elapsed_minutes=elapsed_minutes,
         )
         turnover_rate = self._compute_turnover_rate(symbol, current_volume)
 

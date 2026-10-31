@@ -21,6 +21,7 @@ from enum import Enum
 
 from src.config import get_config
 from src.analyzer import AnalysisResult, get_result_signal_level
+from src.core.trade_plan import render_trade_plan_lines
 from src.enums import ReportType
 from bot.models import BotMessage
 from src.utils.data_processing import normalize_model_used
@@ -833,6 +834,24 @@ class NotificationService(
             "",
         ]
 
+        # 市场主线（同一轮所有股票共享同一份快照）
+        themes = next(
+            (
+                getattr(result, "market_themes", None)
+                for result in results
+                if isinstance(getattr(result, "market_themes", None), dict)
+                and getattr(result, "market_themes").get("status") in ("ok", "partial")
+            ),
+            None,
+        )
+        if themes:
+            report_lines.extend([
+                "## 🌡️ 今日市场主线",
+                "",
+                f"> {themes.get('summary', '')}",
+                "",
+            ])
+
         # === 新增：分析结果摘要 (Issue #112) ===
         if results:
             report_lines.extend([
@@ -1040,6 +1059,10 @@ class NotificationService(
                             f"| 🎊 目标位 | {self._clean_sniper_value(sniper.get('take_profit', 'N/A'))} |",
                             "",
                         ])
+                    # 交易计划：回答"什么时候买 / 卖 / 等"
+                    trade_plan_lines = render_trade_plan_lines(dashboard)
+                    if trade_plan_lines:
+                        report_lines.extend(trade_plan_lines)
                     # 仓位策略
                     position = battle.get('position_strategy', {})
                     if position:
@@ -1564,6 +1587,11 @@ class NotificationService(
             take_profit = sniper.get('take_profit', '-')
             lines.append(f"| {ideal_buy} | {stop_loss} | {take_profit} |")
             lines.append("")
+
+        # 交易计划：什么时候买 / 卖 / 等
+        trade_plan_lines = render_trade_plan_lines(getattr(result, "dashboard", None))
+        if trade_plan_lines:
+            lines.extend(trade_plan_lines)
         
         # 持仓建议
         pos_advice = core.get('position_advice', {}) if core else {}

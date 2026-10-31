@@ -452,11 +452,22 @@ class AkshareFundamentalAdapter:
         return result
 
 
-class HkYfinanceFundamentalAdapter:
-    """Structured HK fundamental adapter backed by Yahoo Finance."""
+class YfinanceFundamentalAdapter:
+    """Structured fundamental adapter backed by Yahoo Finance.
+
+    Used as the structured source for HK, and as the enrichment/fallback
+    source for US (SEC covers filings and reported growth; yfinance adds
+    valuation multiples, margins, analyst targets and the earnings calendar).
+    """
+
+    market = "hk"
+
+    def __init__(self, market: Optional[str] = None) -> None:
+        if market:
+            self.market = str(market).strip().lower()
 
     @staticmethod
-    def _to_yf_symbol(stock_code: str) -> str:
+    def _to_hk_symbol(stock_code: str) -> str:
         code = _safe_str(stock_code).upper()
         if code.startswith("HK"):
             code = code[2:]
@@ -467,13 +478,20 @@ class HkYfinanceFundamentalAdapter:
             return ""
         return f"{int(digits):04d}.HK"
 
+    def _to_yf_symbol(self, stock_code: str) -> str:
+        if self.market == "us":
+            code = _safe_str(stock_code).upper()
+            # Yahoo uses BRK-B instead of BRK.B for share classes.
+            return code.replace(".", "-") if code else ""
+        return self._to_hk_symbol(stock_code)
+
     @staticmethod
     def _coerce_timestamp(value: Any) -> Optional[str]:
         if value in (None, "", [], (), {}):
             return None
         if isinstance(value, (list, tuple)):
             for item in value:
-                parsed = HkYfinanceFundamentalAdapter._coerce_timestamp(item)
+                parsed = YfinanceFundamentalAdapter._coerce_timestamp(item)
                 if parsed:
                     return parsed
             return None
@@ -493,19 +511,68 @@ class HkYfinanceFundamentalAdapter:
             return parsed.strftime("%Y-%m-%d")
         return None
 
+    @staticmethod
+    def _aggregate_insider_transactions(ticker: Any, days: int = 90) -> Dict[str, Any]:
+        """Aggregate insider buys/sells (direction + value), not just Form 4 count."""
+        try:
+            frame = ticker.insider_transactions
+        except Exception:
+            return {}
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return {}
+
+        try:
+            work = frame.copy()
+            if "Start Date" in work.columns:
+                work["_date"] = pd.to_datetime(work["Start Date"], errors="coerce")
+                if getattr(work["_date"].dt, "tz", None) is not None:
+                    work["_date"] = work["_date"].dt.tz_localize(None)
+                cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=max(1, days))
+                work = work[work["_date"].notna() & (work["_date"] >= cutoff)]
+            if work.empty:
+                return {}
+
+            text = (
+                work.get("Transaction", pd.Series([""] * len(work))).astype(str)
+                + " "
+                + work.get("Text", pd.Series([""] * len(work))).astype(str)
+            ).str.lower()
+            shares = pd.to_numeric(work.get("Shares"), errors="coerce").fillna(0.0)
+            value = pd.to_numeric(work.get("Value"), errors="coerce").fillna(0.0)
+
+            is_buy = text.str.contains("purchase|buy", regex=True)
+            is_sell = text.str.contains("sale|sell", regex=True)
+            if not bool(is_buy.any() or is_sell.any()):
+                return {}
+
+            buy_value = float(value[is_buy].sum())
+            sell_value = float(value[is_sell].sum())
+            return {
+                "insider_buy_count_90d": int(is_buy.sum()),
+                "insider_sell_count_90d": int(is_sell.sum()),
+                "insider_buy_shares_90d": int(round(float(shares[is_buy].sum()))),
+                "insider_sell_shares_90d": int(round(float(shares[is_sell].sum()))),
+                "insider_buy_value_90d": round(buy_value, 2),
+                "insider_sell_value_90d": round(sell_value, 2),
+                "insider_net_value_90d": round(buy_value - sell_value, 2),
+            }
+        except Exception:
+            return {}
+
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "status": "not_supported",
             "growth": {},
             "earnings": {},
             "institution": {},
+            "valuation": {},
             "source_chain": [],
             "errors": [],
         }
 
         symbol = self._to_yf_symbol(stock_code)
         if not symbol:
-            result["errors"].append("hk_symbol_invalid")
+            result["errors"].append(f"{self.market}_symbol_invalid")
             return result
 
         try:
@@ -518,7 +585,10 @@ class HkYfinanceFundamentalAdapter:
             ticker = yf.Ticker(symbol)
             info = ticker.info or {}
         except Exception as exc:
-            result["errors"].append(f"hk_yfinance_info:{type(exc).__name__}")
+            result["errors"].append(f"{self.market}_yfinance_info:{type(exc).__name__}")
+            return result
+        if not isinstance(info, dict) or not info:
+            result["errors"].append(f"{self.market}_yfinance_empty")
             return result
 
         growth = {
@@ -529,6 +599,8 @@ class HkYfinanceFundamentalAdapter:
             ),
             "roe": _scale_ratio(_safe_float(info.get("returnOnEquity"))),
             "gross_margin": _scale_ratio(_safe_float(info.get("grossMargins"))),
+            "operating_margin": _scale_ratio(_safe_float(info.get("operatingMargins"))),
+            "profit_margin": _scale_ratio(_safe_float(info.get("profitMargins"))),
         }
         growth = {key: value for key, value in growth.items() if value is not None}
         if growth:
@@ -546,6 +618,8 @@ class HkYfinanceFundamentalAdapter:
             # dividendYield 的口径随 yfinance 版本在"百分数"和"小数"之间变过，
             # 无法可靠归一化；原样输出，不按比率再乘 100。
             "dividend_yield_raw": _safe_float(info.get("dividendYield")),
+            "eps_trailing": _safe_float(info.get("trailingEps")),
+            "eps_forward": _safe_float(info.get("forwardEps")),
         }
         earnings = {key: value for key, value in earnings.items() if value not in (None, "", [], {})}
         if earnings:
@@ -557,16 +631,115 @@ class HkYfinanceFundamentalAdapter:
             "analyst_coverage_count": _safe_float(info.get("numberOfAnalystOpinions")),
             "target_mean_price": _safe_float(info.get("targetMeanPrice")),
             "recommendation_key": _safe_str(info.get("recommendationKey")) or None,
+            "beta": _safe_float(info.get("beta")),
+            "week52_high": _safe_float(info.get("fiftyTwoWeekHigh")),
+            "week52_low": _safe_float(info.get("fiftyTwoWeekLow")),
+            # yfinance 的 debtToEquity 已是百分数（78.4 = 78.4%），不再乘 100
+            "debt_to_equity": _safe_float(info.get("debtToEquity")),
+            "current_ratio": _safe_float(info.get("currentRatio")),
+            "free_cashflow": _safe_float(info.get("freeCashflow")),
+            "sector": _safe_str(info.get("sector")) or None,
+            "industry": _safe_str(info.get("industry")) or None,
+            "float_shares": _safe_float(info.get("floatShares")),
+            # 空头结构：shortPercentOfFloat 是小数口径（0.009 = 0.9%）
+            "short_percent_float": _scale_ratio(_safe_float(info.get("shortPercentOfFloat"))),
+            "short_percent_outstanding": _scale_ratio(
+                _safe_float(info.get("shortPercentOfSharesOutstanding"))
+            ),
+            "short_ratio_days": _safe_float(info.get("shortRatio")),
+            "shares_short": _safe_float(info.get("sharesShort")),
+            "shares_short_prior_month": _safe_float(info.get("sharesShortPriorMonth")),
+            "short_interest_date": self._coerce_timestamp(info.get("dateShortInterest")),
+            "short_change_pct": _pct_change(
+                _safe_float(info.get("sharesShort")),
+                _safe_float(info.get("sharesShortPriorMonth")),
+            ),
         }
+        institution.update(
+            self._aggregate_insider_transactions(ticker) if self.market == "us" else {}
+        )
         institution = {key: value for key, value in institution.items() if value not in (None, "", [], {})}
         if institution:
             result["institution"] = institution
             result["source_chain"].append("institution:yfinance_info")
 
-        if result["growth"] or result["earnings"] or result["institution"]:
+        valuation = {
+            "pe_ratio": _safe_float(info.get("trailingPE")),
+            "forward_pe": _safe_float(info.get("forwardPE")),
+            "pb_ratio": _safe_float(info.get("priceToBook")),
+            "ps_ratio": _safe_float(info.get("priceToSalesTrailing12Months")),
+            "peg_ratio": _safe_float(info.get("pegRatio") or info.get("trailingPegRatio")),
+            "ev_to_ebitda": _safe_float(info.get("enterpriseToEbitda")),
+            "market_cap": _safe_float(info.get("marketCap")),
+        }
+        valuation = {key: value for key, value in valuation.items() if value is not None}
+        if valuation:
+            result["valuation"] = valuation
+            result["source_chain"].append("valuation:yfinance_info")
+
+        if result["growth"] or result["earnings"] or result["institution"] or result["valuation"]:
             result["status"] = "partial"
 
         return result
+
+
+class HkYfinanceFundamentalAdapter(YfinanceFundamentalAdapter):
+    """Backward-compatible HK adapter."""
+
+    market = "hk"
+
+
+class UsYfinanceFundamentalAdapter(YfinanceFundamentalAdapter):
+    """US fallback/enrichment adapter (valuation, margins, analyst targets)."""
+
+    market = "us"
+
+
+def merge_fundamental_bundles(
+    primary: Optional[Dict[str, Any]],
+    secondary: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Merge two fundamental bundles without losing either source.
+
+    ``primary`` wins for scalar conflicts (e.g. reported growth from SEC),
+    while dict blocks are merged key-by-key so valuation fields from a
+    secondary provider still land in the bundle.
+    """
+    primary = primary if isinstance(primary, dict) else {}
+    secondary = secondary if isinstance(secondary, dict) else {}
+
+    has_primary = any(bool(primary.get(block)) for block in ("growth", "earnings", "institution", "valuation"))
+    has_secondary = any(bool(secondary.get(block)) for block in ("growth", "earnings", "institution", "valuation"))
+    if not has_primary:
+        return secondary if has_secondary else primary
+    if not has_secondary:
+        return primary
+
+    merged: Dict[str, Any] = {
+        "status": "partial",
+        "growth": {},
+        "earnings": {},
+        "institution": {},
+        "valuation": {},
+        "source_chain": [],
+        "errors": [],
+    }
+    for block in ("growth", "earnings", "institution", "valuation"):
+        merged[block] = dict(secondary.get(block) or {})
+        merged[block].update(primary.get(block) or {})
+        merged[block] = {key: value for key, value in merged[block].items() if value is not None}
+
+    for chain in (primary.get("source_chain") or [], secondary.get("source_chain") or []):
+        for item in chain:
+            if item not in merged["source_chain"]:
+                merged["source_chain"].append(item)
+    for err in (primary.get("errors") or []) + (secondary.get("errors") or []):
+        if err not in merged["errors"]:
+            merged["errors"].append(err)
+
+    if not any(merged[block] for block in ("growth", "earnings", "institution", "valuation")):
+        merged["status"] = str(primary.get("status") or secondary.get("status") or "not_supported")
+    return merged
 
 
 class UsSecFundamentalAdapter:

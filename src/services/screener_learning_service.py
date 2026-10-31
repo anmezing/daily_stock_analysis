@@ -61,9 +61,9 @@ def _excess(record: Dict[str, Any], horizon: int) -> Optional[float]:
     return _safe_float(outcome.get("excess_spy"))
 
 
-def _hit_rate(values: Sequence[float]) -> float:
+def _hit_rate(values: Sequence[float]) -> Optional[float]:
     if not values:
-        return 0.0
+        return None
     return round(sum(1 for value in values if value > 0) / len(values) * 100, 1)
 
 
@@ -353,13 +353,21 @@ class ScreenerLearningService:
             temp = self._state_path.with_suffix(".tmp")
             temp.write_text(json.dumps(adjustments, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, self._state_path)
-        logger.info(
-            "[选股学习] 调整已更新: samples=%s hit=%s%% avg_excess=%s%% disabled_states=%s",
-            adjustments.get("overall", {}).get("samples"),
-            adjustments.get("overall", {}).get("hit_rate_10d"),
-            adjustments.get("overall", {}).get("avg_excess_10d"),
-            adjustments.get("disabled_states"),
-        )
+        overall = adjustments.get("overall") or {}
+        samples = int(overall.get("samples") or 0)
+        if samples <= 0:
+            logger.info(
+                "[选股学习] 尚无已评估样本，暂不调整（台账 %s 条）",
+                adjustments.get("ledger_size", 0),
+            )
+        else:
+            logger.info(
+                "[选股学习] 调整已更新: samples=%s hit=%s%% avg_excess=%s%% disabled_states=%s",
+                samples,
+                overall.get("hit_rate_10d"),
+                overall.get("avg_excess_10d"),
+                adjustments.get("disabled_states"),
+            )
         return adjustments
 
     def apply_adjustments(

@@ -950,6 +950,16 @@ def run_screener_schedule(config: Config, args: argparse.Namespace) -> int:
 
     def task() -> None:
         runtime_config = _reload_runtime_config()
+        if not getattr(args, 'force_run', False):
+            try:
+                from src.core.trading_calendar import get_market_today, is_market_open
+
+                us_today = get_market_today("us")
+                if not is_market_open("us", us_today):
+                    logger.info("[选股] 美股 %s 休市（周末/节假日），跳过本次选股", us_today)
+                    return
+            except Exception as exc:
+                logger.debug("[选股] 交易日检查失败，按原计划执行: %s", exc)
         run_screener(runtime_config, args)
 
     logger.info(

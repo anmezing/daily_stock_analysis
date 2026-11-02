@@ -570,6 +570,7 @@ class AgentOrchestrator:
             ctx.stock_code = context.get("stock_code", "")
             ctx.stock_name = context.get("stock_name", "")
             ctx.meta["strategies_requested"] = context.get("strategies", [])
+            ctx.meta["report_language"] = context.get("report_language", "zh")
 
             # Pre-populate data fields that the caller already has
             for data_key in ("realtime_quote", "daily_history", "chip_distribution",

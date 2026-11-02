@@ -13,7 +13,7 @@
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,39 @@ def is_market_open(market: str, check_date: date) -> bool:
     except Exception as e:
         logger.warning("trading_calendar.is_market_open fail-open: %s", e)
         return True
+
+
+def count_trading_sessions(start: date, end: date, market: str = "us") -> int:
+    """Count trading sessions in ``(start, end]`` for the given market.
+
+    Calendar-day arithmetic mis-handles long weekends and exchange holidays
+    (Friday -> Tuesday is 4 calendar days but 1 session).  This helper keeps
+    screener evaluation windows and monitoring windows in trading time.
+    """
+    if end <= start:
+        return 0
+    if not _XCALS_AVAILABLE:
+        # Fail-open: count weekdays so a missing dependency does not stall the
+        # learning loop entirely.
+        cursor = start + timedelta(days=1)
+        count = 0
+        while cursor <= end:
+            if cursor.weekday() < 5:
+                count += 1
+            cursor += timedelta(days=1)
+        return count
+
+    try:
+        count = 0
+        cursor = start + timedelta(days=1)
+        while cursor <= end:
+            if is_market_open(market, cursor):
+                count += 1
+            cursor += timedelta(days=1)
+        return count
+    except Exception as exc:
+        logger.warning("count_trading_sessions fail-open: %s", exc)
+        return (end - start).days
 
 
 def get_open_markets_today() -> Set[str]:

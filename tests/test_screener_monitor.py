@@ -23,7 +23,7 @@ class _Filings:
 
 
 class ScreenerMonitorTest(unittest.TestCase):
-    def _service(self, temp_dir, filings=None):
+    def _service(self, temp_dir, filings=None, consecutive_days=2):
         learning = ScreenerLearningService(
             ledger_path=str(Path(temp_dir) / "picks.jsonl"),
             state_path=str(Path(temp_dir) / "learning.json"),
@@ -37,6 +37,8 @@ class ScreenerMonitorTest(unittest.TestCase):
                 "name": "Alpha",
                 "sector_etf": "XLK",
                 "state": "pullback",
+                "consecutive_days": consecutive_days,
+                "stage": "watching" if consecutive_days >= 2 else "new",
                 "plan": {"stop_loss": 90, "target_1": 120},
                 "earnings_date": (date.today() + timedelta(days=2)).isoformat(),
             }
@@ -76,6 +78,12 @@ class ScreenerMonitorTest(unittest.TestCase):
             result = monitor.check()
             kinds = {alert["kind"] for alert in result["alerts"]}
             self.assertIn("dilution", kinds)
+
+    def test_day_one_pick_is_not_alerted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _, monitor = self._service(temp_dir, consecutive_days=1)
+            result = monitor.check()
+            self.assertEqual(result["alerts"], [])
 
     def test_old_filing_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

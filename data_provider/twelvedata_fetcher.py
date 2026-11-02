@@ -749,7 +749,17 @@ class TwelveDataFetcher(BaseFetcher):
         except Exception:
             market = "us"
         quote_timestamp = safe_float(payload.get("timestamp")) if isinstance(payload, dict) else None
-        elapsed_minutes = self._elapsed_session_minutes(market, quote_timestamp)
+        elapsed_minutes = None
+        if quote_timestamp:
+            elapsed_minutes = self._elapsed_session_minutes(market, quote_timestamp)
+        elif current_date:
+            try:
+                from src.core.trading_calendar import get_market_today
+
+                if current_date == get_market_today(market).isoformat():
+                    elapsed_minutes = self._elapsed_session_minutes(market, None)
+            except Exception:
+                elapsed_minutes = None
         volume_ratio = self._compute_volume_ratio(
             symbol,
             current_volume,

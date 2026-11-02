@@ -61,6 +61,15 @@ def _excess(record: Dict[str, Any], horizon: int) -> Optional[float]:
     return _safe_float(outcome.get("excess_spy"))
 
 
+def _trading_sessions_since(day: date) -> int:
+    try:
+        from src.core.trading_calendar import count_trading_sessions
+
+        return count_trading_sessions(day, date.today(), "us")
+    except Exception:
+        return (date.today() - day).days
+
+
 def _hit_rate(values: Sequence[float]) -> Optional[float]:
     if not values:
         return None
@@ -279,14 +288,13 @@ class ScreenerLearningService:
     def evaluate_pending(self) -> int:
         """Fill T+5/T+10/T+20 outcomes for picks old enough to evaluate."""
         records = self._read_ledger()
-        today = date.today()
         pending: List[Tuple[int, Dict[str, Any], date]] = []
         symbols = set()
         for position, record in enumerate(records):
             day = _pick_date(record)
             if day is None:
                 continue
-            if (today - day).days < 7:
+            if _trading_sessions_since(day) < 5:
                 continue
             outcomes = record.get("outcomes") or {}
             missing = [horizon for horizon in _HORIZONS if f"d{horizon}" not in outcomes]
@@ -417,10 +425,9 @@ class ScreenerLearningService:
     # Ledger helpers
     # ------------------------------------------------------------------
     def _has_pending(self) -> bool:
-        today = date.today()
         for record in self._read_ledger():
             day = _pick_date(record)
-            if day is None or (today - day).days < 7:
+            if day is None or _trading_sessions_since(day) < 5:
                 continue
             outcomes = record.get("outcomes") or {}
             if any(f"d{horizon}" not in outcomes for horizon in _HORIZONS):

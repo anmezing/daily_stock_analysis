@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -31,11 +32,13 @@ class ScreenerMonitorService:
         filing_provider: Any = None,
         notify: bool = True,
         active_days: int = 30,
+        min_alert_days: int = 2,
     ) -> None:
         self._learning = learning_service
         self._filing_provider = filing_provider
         self._notify = notify
         self._active_days = max(5, int(active_days))
+        self._min_alert_days = max(1, int(min_alert_days))
 
     def check(self) -> Dict[str, Any]:
         records = self._learning._read_ledger()
@@ -53,9 +56,16 @@ class ScreenerMonitorService:
             except ValueError:
                 continue
             if (today - pick_day).days > self._active_days:
-                record["closed"] = True
-                record["closed_reason"] = "time_stop"
-                continue
+                try:
+                    from src.core.trading_calendar import count_trading_sessions
+
+                    elapsed_sessions = count_trading_sessions(pick_day, today, "us")
+                except Exception:
+                    elapsed_sessions = (today - pick_day).days
+                if elapsed_sessions > self._active_days:
+                    record["closed"] = True
+                    record["closed_reason"] = "time_stop"
+                    continue
             active.append(record)
 
         if not active:
@@ -68,6 +78,10 @@ class ScreenerMonitorService:
 
         for record in active:
             symbol = str(record.get("symbol") or "").upper()
+            # Day-one picks are still noisy; only alert once the name has
+            # persisted for at least two runs.
+            if int(record.get("consecutive_days") or 1) < self._min_alert_days:
+                continue
             rows = history.get(symbol) or []
             if not rows:
                 continue
@@ -168,10 +182,14 @@ class ScreenerMonitorService:
 
     @staticmethod
     def _send(alerts: List[Dict[str, Any]]) -> None:
-        lines = ["## 🚨 选股持仓告警", ""]
+        lines = ["## 🚨 股池风险告警（选后监控，不是新选股）", ""]
         for item in alerts[:20]:
+            name = str(item.get("name") or "").strip()
+            if not re.search(r"[\u4e00-\u9fff]", name):
+                name = ""
+            suffix = f" {name}" if name else ""
             lines.append(
-                f"- **{item.get('symbol')}** {item.get('name') or ''}：{item.get('message')}"
+                f"- **{item.get('symbol')}**{suffix}：{item.get('message')}"
             )
         try:
             from src.notification import NotificationService

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,23 +82,11 @@ def _trend(history: List[float]) -> str:
 
 
 def _trading_gap(previous: date, current: date, market: str = "us") -> int:
-    """Count US trading sessions between two dates (exclusive of previous).
-
-    Calendar-day gaps mis-handle long weekends and NYSE holidays: a Friday ->
-    Tuesday gap is 4 calendar days but only 1 trading session.
-    """
-    if current <= previous:
-        return 0
+    """Count US trading sessions between two dates (exclusive of previous)."""
     try:
-        from src.core.trading_calendar import is_market_open
+        from src.core.trading_calendar import count_trading_sessions
 
-        count = 0
-        cursor = previous + timedelta(days=1)
-        while cursor <= current:
-            if is_market_open(market, cursor):
-                count += 1
-            cursor += timedelta(days=1)
-        return count
+        return count_trading_sessions(previous, current, market)
     except Exception:
         return (current - previous).days
 

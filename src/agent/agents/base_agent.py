@@ -144,14 +144,36 @@ class BaseAgent(ABC):
 
         return result
 
+    def _language_prompt(self, ctx: AgentContext) -> str:
+        """Force the final agent output language regardless of prompt language."""
+        language = str((ctx.meta or {}).get("report_language") or "zh").strip().lower()
+        if language == "en":
+            return (
+                "## Output Language\n\n"
+                "- Write every human-readable value in English.\n"
+                "- Keep JSON keys unchanged.\n"
+                "- `decision_type` stays `buy|hold|sell`."
+            )
+        return (
+            "## 输出语言\n\n"
+            "- 所有面向用户的文本必须使用中文，包括 reasoning、summary、risk、checklist 和交易计划。\n"
+            "- JSON 键名保持不变。\n"
+            "- `decision_type` 只能使用 `buy|hold|sell`。\n"
+            "- 股票代码、指标名（MA20、PE、RSI）可以保留英文。"
+        )
+
     # -----------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------
 
     def _build_messages(self, ctx: AgentContext) -> List[Dict[str, Any]]:
         """Assemble the initial messages list for the LLM."""
+        system_content = self.system_prompt(ctx)
+        language_prompt = self._language_prompt(ctx)
+        if language_prompt:
+            system_content = f"{system_content}\n\n{language_prompt}"
         messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt(ctx)},
+            {"role": "system", "content": system_content},
         ]
 
         history = ctx.meta.get("conversation_history")

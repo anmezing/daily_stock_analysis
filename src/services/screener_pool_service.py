@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -81,6 +81,28 @@ def _trend(history: List[float]) -> str:
     return "stable"
 
 
+def _trading_gap(previous: date, current: date, market: str = "us") -> int:
+    """Count US trading sessions between two dates (exclusive of previous).
+
+    Calendar-day gaps mis-handle long weekends and NYSE holidays: a Friday ->
+    Tuesday gap is 4 calendar days but only 1 trading session.
+    """
+    if current <= previous:
+        return 0
+    try:
+        from src.core.trading_calendar import is_market_open
+
+        count = 0
+        cursor = previous + timedelta(days=1)
+        while cursor <= current:
+            if is_market_open(market, cursor):
+                count += 1
+            cursor += timedelta(days=1)
+        return count
+    except Exception:
+        return (current - previous).days
+
+
 class ScreenerPoolService:
     def __init__(
         self,
@@ -129,10 +151,10 @@ class ScreenerPoolService:
                 consecutive = int(existing.get("consecutive_days") or 1)
             elif previous_day:
                 try:
-                    gap = (date.fromisoformat(run_day) - date.fromisoformat(previous_day)).days
+                    gap = _trading_gap(date.fromisoformat(previous_day), date.fromisoformat(run_day))
                 except ValueError:
                     gap = 99
-                consecutive = int(existing.get("consecutive_days") or 0) + 1 if gap <= 4 else 1
+                consecutive = int(existing.get("consecutive_days") or 0) + 1 if gap <= 2 else 1
             else:
                 consecutive = 1
 

@@ -289,6 +289,34 @@ _SESSION_LABEL = {
 }
 
 
+def get_elapsed_session_minutes(market: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
+    """Return elapsed regular-session minutes, or None outside the session."""
+    hours = _MARKET_HOURS.get(market or "")
+    if not hours:
+        return None
+    if get_market_session(market) != "trading":
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(MARKET_TIMEZONE[market])
+        current = now or datetime.now(tz)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=tz)
+        open_hour = float(hours["open_start"])
+        close_hour = float(hours["close_end"])
+        open_minutes = int(open_hour * 60)
+        close_minutes = int(close_hour * 60)
+        now_minutes = current.hour * 60 + current.minute
+        elapsed = now_minutes - open_minutes
+        total = close_minutes - open_minutes
+        if elapsed <= 0 or elapsed >= total:
+            return None
+        return elapsed
+    except Exception:
+        return None
+
+
 def get_session_label(market: Optional[str]) -> str:
     """Return a human-readable Chinese label for the current market session."""
     session = get_market_session(market)

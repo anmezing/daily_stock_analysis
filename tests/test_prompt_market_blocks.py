@@ -102,7 +102,15 @@ class PromptMarketBlocksTest(unittest.TestCase):
 
         self.assertIn("盘中累计量，待收盘确认", prompt)
         self.assertIn("5日量比（日K）", prompt)
-        self.assertIn("盘中待收盘确认", prompt)
+        self.assertIn("盘中待确认", prompt)
+
+    def test_intraday_fallback_ratio_is_shown(self) -> None:
+        prompt = self.analyzer._format_prompt(
+            _context(intraday_volume_ratio=3.47),
+            "Apple",
+            None,
+        )
+        self.assertIn("3.47（按已开市分钟折算）", prompt)
 
     def test_missing_themes_does_not_break_prompt(self) -> None:
         prompt = self.analyzer._format_prompt(

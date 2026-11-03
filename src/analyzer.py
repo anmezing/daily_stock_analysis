@@ -2280,7 +2280,7 @@ class GeminiAnalyzer:
         if 'realtime' in context:
             rt = context['realtime']
             session_label = context.get('session_label', '')
-            raw_volume_ratio = rt.get('volume_ratio')
+            raw_volume_ratio = rt.get('volume_ratio') or context.get('intraday_volume_ratio')
             if raw_volume_ratio is None and context.get('is_intraday'):
                 volume_ratio_text = "N/A（盘中累计量，待收盘确认）"
             elif raw_volume_ratio is None:
@@ -2449,7 +2449,7 @@ class GeminiAnalyzer:
             missing_fields.append('成交量')
         realtime_data = context.get('realtime') or {}
         if realtime_data:
-            if realtime_data.get('volume_ratio') is None:
+            if realtime_data.get('volume_ratio') is None and context.get('intraday_volume_ratio') is None:
                 missing_fields.append('量比')
             if realtime_data.get('turnover_rate') is None:
                 missing_fields.append('换手率')
@@ -2571,9 +2571,16 @@ class GeminiAnalyzer:
         return f"{sign}{amount:.0f}"
 
     def _format_volume_ratio_5d(self, value: Optional[float], context: Dict[str, Any]) -> str:
-        """5-day volume ratio is a full-day metric; intraday it is misleading."""
+        """5-day volume ratio; intraday uses the time-normalised fallback."""
         if isinstance(context, dict) and context.get("is_intraday"):
-            return "盘中待收盘确认"
+            ratio = context.get("intraday_volume_ratio")
+            try:
+                ratio_value = float(ratio) if ratio is not None else None
+            except (TypeError, ValueError):
+                ratio_value = None
+            if ratio_value is None or ratio_value <= 0:
+                return "盘中待确认"
+            return f"{ratio_value:.2f}（按已开市分钟折算）"
         try:
             ratio = float(value) if value is not None else None
         except (TypeError, ValueError):

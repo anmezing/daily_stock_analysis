@@ -41,8 +41,9 @@ from src.services.benchmark_service import BenchmarkService
 from src.enums import ReportType
 from src.stock_analyzer import StockTrendAnalyzer, TrendAnalysisResult
 from src.core.relative_strength import compute_relative_strength
+from src.core.intraday_metrics import normalize_intraday_volume_ratio
 from src.core.trade_plan import apply_trade_plan_fallback, build_trade_plan
-from src.core.trading_calendar import get_market_for_stock, get_market_now, get_market_today, is_market_open, get_market_session, get_session_label
+from src.core.trading_calendar import get_market_for_stock, get_market_now, get_market_today, is_market_open, get_market_session, get_session_label, get_elapsed_session_minutes
 from src.services.market_themes_service import get_market_themes_service
 from bot.models import BotMessage
 
@@ -840,7 +841,46 @@ class StockAnalysisPipeline:
             context, realtime_quote, market_regime
         )
 
+        # 盘中量比兜底：实时行情可能没有 volume_ratio，但通常有累计成交量。
+        # 用前 5 日均量 + 已开市分钟数折算，避免整段盘中都显示"量能未知"。
+        self._apply_intraday_volume_ratio(enhanced, realtime_quote, market_tag)
+
         return enhanced
+
+    def _apply_intraday_volume_ratio(
+        self,
+        enhanced: Dict[str, Any],
+        realtime_quote: Any,
+        market: str,
+    ) -> None:
+        if not enhanced.get("is_intraday"):
+            return
+        today = enhanced.get("today") if isinstance(enhanced.get("today"), dict) else {}
+        volume = getattr(realtime_quote, "volume", None) if realtime_quote else None
+        if not volume:
+            volume = today.get("volume")
+        history = enhanced.get("history") if isinstance(enhanced.get("history"), list) else []
+        volumes = [
+            float(bar.get("volume"))
+            for bar in history[-5:]
+            if isinstance(bar, dict) and bar.get("volume")
+        ]
+        if not volume or len(volumes) < 3:
+            return
+        average = sum(volumes) / len(volumes)
+        elapsed = get_elapsed_session_minutes(market)
+        ratio = normalize_intraday_volume_ratio(volume, average, elapsed)
+        if ratio is None:
+            return
+
+        enhanced["intraday_volume_ratio"] = ratio
+        realtime = enhanced.get("realtime")
+        if isinstance(realtime, dict) and realtime.get("volume_ratio") is None:
+            realtime["volume_ratio"] = ratio
+            realtime["volume_ratio_desc"] = self._describe_volume_ratio(ratio)
+        trend = enhanced.get("trend_analysis")
+        if isinstance(trend, dict):
+            trend["volume_ratio_5d"] = ratio
 
     def _ensure_agent_history(self, code: str, min_days: int = 320) -> None:
         """Ensure at least *min_days* of K-line history is in DB for agent tools."""

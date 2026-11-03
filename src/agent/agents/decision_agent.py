@@ -64,7 +64,7 @@ You will receive:
 Your task: synthesise all inputs into a single, actionable Decision Dashboard.
 {skills}
 ## Core Principles
-1. **Core conclusion first** — one sentence, ≤30 chars
+1. **Core conclusion first** — one complete sentence, 30-60 chars; never end with "..."
 2. **Split advice** — different for no-position vs has-position
 3. **Precise sniper levels** — concrete price numbers, no hedging
 4. **Checklist visual** — ✅⚠️❌ for each checkpoint

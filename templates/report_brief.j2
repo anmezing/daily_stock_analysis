@@ -8,7 +8,7 @@
 {% else %}
 {% set dash = e.result.dashboard or {} %}
 {% set core = (dash.get('core_conclusion') or {}) if dash else {} %}
-{% set one = (core.get('one_sentence') or e.result.analysis_summary or '')[:60] %}
+{% set one = (core.get('one_sentence') or e.result.analysis_summary or '')[:120] %}
 **{{ e.stock_name }}({{ e.result.code }})** {{ e.signal_emoji }} {{ e.result.operation_advice }} | 评分{{ e.result.sentiment_score }} | {{ one }}
 {% endif %}
 {% endfor %}

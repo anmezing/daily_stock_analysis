@@ -826,7 +826,7 @@ class AgentOrchestrator:
             intelligence["latest_news"] = latest_news
 
         if not core.get("one_sentence"):
-            core["one_sentence"] = _truncate_text(analysis_summary, 60)
+            core["one_sentence"] = _first_complete_sentence(analysis_summary)
         if not core.get("time_sensitivity"):
             core["time_sensitivity"] = "本周内"
         if not core.get("signal_type"):
@@ -1419,6 +1419,17 @@ def _truncate_text(text: Any, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _first_complete_sentence(text: Any) -> str:
+    """Return the first complete sentence without cutting mid-sentence."""
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    match = re.search(r"[。！？!?]\s*", value)
+    if match:
+        return value[: match.end()].strip()
+    return value
 
 
 def _extract_latest_news_title(intelligence: Dict[str, Any]) -> str:

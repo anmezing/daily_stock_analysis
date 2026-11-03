@@ -1141,7 +1141,7 @@ class GeminiAnalyzer:
 
     "dashboard": {
         "core_conclusion": {
-            "one_sentence": "一句话核心结论（30字以内，直接告诉用户做什么）",
+            "one_sentence": "完整一句话核心结论（30-60字，直接告诉用户做什么；不要以省略号结尾）",
             "signal_type": "买入信号/持有待机/持有观望/谨慎观望/卖出信号/风险警告",
             "time_sensitivity": "立即行动/今日内/本周内/不急",
             "position_advice": {

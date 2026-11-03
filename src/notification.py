@@ -1224,7 +1224,7 @@ class NotificationService(
                 # 核心决策（一句话）
                 one_sentence = core.get('one_sentence', result.analysis_summary) if core else result.analysis_summary
                 if one_sentence:
-                    lines.append(f"📌 **{one_sentence[:80]}**")
+                    lines.append(f"📌 **{one_sentence[:120]}**")
                     lines.append("")
                 
                 # 重要信息区（舆情+基本面）
@@ -1452,7 +1452,7 @@ class NotificationService(
             name = r.name if r.name and not r.name.startswith('股票') else f'股票{r.code}'
             dash = r.dashboard or {}
             core = dash.get('core_conclusion', {}) or {}
-            one = (core.get('one_sentence') or r.analysis_summary or '')[:60]
+            one = (core.get('one_sentence') or r.analysis_summary or '')[:120]
             lines.append(f"**{self._escape_md(name)}({r.code})** {emoji} {r.operation_advice} | 评分{r.sentiment_score} | {one}")
         lines.append("")
         lines.append(f"*{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")

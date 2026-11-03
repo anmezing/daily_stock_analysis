@@ -92,7 +92,7 @@ AGENT_SYSTEM_PROMPT = """你是一位专注于趋势交易的{market_role}投资
     "confidence_level": "<high|medium|low>",
     "dashboard": {{
         "core_conclusion": {{
-            "one_sentence": "<core conclusion in ≤30 chars>",
+            "one_sentence": "<complete one-sentence conclusion, 30-60 chars; never end with '...'>",
             "signal_type": "🟢buy|🟡hold|🔴sell|⚠️risk",
             "time_sensitivity": "<act_now|today|this_week|no_rush>",
             "position_advice": {{

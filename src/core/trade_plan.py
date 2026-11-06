@@ -20,6 +20,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
+# Minimum pullback entry-zone width, in ATR multiples.
+MIN_ENTRY_ZONE_ATR = 0.3
+
+
 def _to_float(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
         return None
@@ -190,10 +194,19 @@ def build_trade_plan(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if entry_high <= entry_low:
             entry_low = close - 0.8 * atr
             entry_high = close - 0.1 * atr
+        elif entry_high - entry_low < MIN_ENTRY_ZONE_ATR * atr:
+            # close - ATR landed right next to anchor + 0.5 ATR: the zone
+            # collapses to a few cents.  Widen it downward toward support.
+            entry_low = entry_high - MIN_ENTRY_ZONE_ATR * atr
         breakout_level = resistance if resistance else close + atr
+        # The breakout path enters at breakout_level, so it needs its own
+        # stop/target: the pullback target_1 below can sit under the trigger.
+        breakout_stop = breakout_level - 1.0 * atr
+        breakout_target = breakout_level + 2.0 * atr
         buy_trigger = (
             f"回踩 {entry_low:.2f}–{entry_high:.2f} 区间止跌（收阳或缩量）后分批买入；"
             f"若放量突破 {breakout_level:.2f}，等回踩不破 {breakout_level:.2f} 再买"
+            f"（突破仓止损 {breakout_stop:.2f}，目标 {breakout_target:.2f}）"
         )
         wait_condition = (
             f"现价高于 {entry_high + 0.8 * atr:.2f}（追高区），"

@@ -65,6 +65,38 @@ class TestTradePlan(unittest.TestCase):
         self.assertTrue(plan["invalidation"])
         self.assertTrue(plan["time_stop"])
 
+    def _at_high_context(self) -> dict:
+        # Flat bars: ATR = 10, swing high 95 < close, so there is no
+        # resistance and breakout_level falls back to close + ATR = 110.
+        # close - ATR (90) sits 0.1 below MA10 + 0.5 ATR (90.1).
+        bars = [
+            {"date": f"2026-10-{i + 1:02d}", "open": 90.0, "high": 95.0, "low": 85.0, "close": 90.0}
+            for i in range(30)
+        ]
+        return {
+            "code": "LLY",
+            "today": {"close": 100.0, "ma10": 85.1, "ma20": 80.0},
+            "history": bars,
+            "trend_analysis": {"trend_status": "多头"},
+        }
+
+    def test_narrow_entry_zone_is_widened(self) -> None:
+        plan = build_trade_plan(self._at_high_context())
+
+        self.assertAlmostEqual(plan["atr"], 10.0)
+        self.assertAlmostEqual(plan["entry_high"], 90.1)
+        self.assertGreaterEqual(plan["entry_high"] - plan["entry_low"], 3.0 - 1e-6)
+        self.assertLess(plan["stop_loss"], plan["entry_low"])
+
+    def test_breakout_path_has_target_above_trigger(self) -> None:
+        plan = build_trade_plan(self._at_high_context())
+
+        # Pullback target_1 sits below the 110 breakout trigger here, so the
+        # breakout clause must carry its own stop and target.
+        self.assertLess(plan["target_1"], 110.0)
+        self.assertIn("若放量突破 110.00", plan["buy_trigger"])
+        self.assertIn("突破仓止损 100.00，目标 130.00", plan["buy_trigger"])
+
     def test_below_ma20_plan_tells_user_to_wait(self) -> None:
         context = {
             "code": "AAPL",

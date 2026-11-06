@@ -944,6 +944,45 @@ def run_screener(config: Config, args: argparse.Namespace) -> Dict:
     return screen_result
 
 
+# Upper bound on promoted names analysed per screener run: keeps LLM quota
+# use predictable even if many names promote on the same day.
+MAX_PROMOTED_ANALYSIS = 5
+
+
+def select_promoted_for_analysis(pool: Dict[str, Any], limit: int = MAX_PROMOTED_ANALYSIS) -> List[str]:
+    """Symbols that promoted to ready/trigger today, trigger first."""
+    promoted = [
+        item
+        for item in (pool.get("items") or {}).values()
+        if item.get("promoted_today") and item.get("stage") in ("ready", "trigger")
+    ]
+    promoted.sort(
+        key=lambda item: (1 if item.get("stage") == "trigger" else 0, float(item.get("last_score") or 0)),
+        reverse=True,
+    )
+    return [str(item.get("symbol")) for item in promoted[: max(0, int(limit))] if item.get("symbol")]
+
+
+def analyze_promoted_pool(config: Config, args: argparse.Namespace) -> List[str]:
+    """Run the full LLM analysis on today's newly promoted pool names."""
+    try:
+        from src.services.screener_pool_service import get_screener_pool_service
+
+        codes = select_promoted_for_analysis(get_screener_pool_service().load())
+    except Exception as exc:
+        logger.warning("[选股] 读取股池失败，跳过晋级标的分析: %s", exc)
+        return []
+    if not codes:
+        logger.info("[选股] 今日没有新晋级标的，跳过深度分析")
+        return []
+    logger.info("[选股] 对今日新晋级标的做深度分析: %s", codes)
+    # Stock analysis only: the market review belongs to the analyzer run.
+    analysis_args = argparse.Namespace(**vars(args))
+    analysis_args.no_market_review = True
+    run_full_analysis(config, analysis_args, codes)
+    return codes
+
+
 def run_screener_schedule(config: Config, args: argparse.Namespace) -> int:
     """Independent daily screener loop (own container / state file)."""
     from src.scheduler import run_with_schedule
@@ -961,6 +1000,8 @@ def run_screener_schedule(config: Config, args: argparse.Namespace) -> int:
             except Exception as exc:
                 logger.debug("[选股] 交易日检查失败，按原计划执行: %s", exc)
         run_screener(runtime_config, args)
+        if getattr(runtime_config, 'screener_analyze_promoted', False):
+            analyze_promoted_pool(runtime_config, args)
 
     logger.info(
         "模式: 选股定时任务，每天 %s（容器时区）执行",

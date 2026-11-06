@@ -750,9 +750,11 @@ class Config:
     schedule_enabled: bool = False            # 是否启用定时任务
     schedule_time: str = "18:00"              # 每日推送时间（HH:MM 格式）
     schedule_run_immediately: bool = True     # 启动时是否立即执行一次
-    # 选股定时任务（独立容器，默认 08:30 美东，避开 10:00 的分析任务）
+    # 选股定时任务（独立容器，默认 08:30 美东，与分析任务错开）
     screener_schedule_time: str = "08:30"
     screener_run_immediately: bool = False
+    # 定时选股后是否自动对"今日新晋级"的股池标的跑 LLM 深度分析（消耗 LLM 额度）
+    screener_analyze_promoted: bool = False
     # 股池晋级门槛：3 天只确认，5 天才推送，10 天标记强确认
     screener_promote_days: int = 5
     screener_push_days: int = 5
@@ -1414,6 +1416,7 @@ class Config:
             schedule_run_immediately=schedule_run_immediately,
             screener_schedule_time=os.getenv('SCREENER_SCHEDULE_TIME', '08:30'),
             screener_run_immediately=os.getenv('SCREENER_RUN_IMMEDIATELY', 'false').lower() == 'true',
+            screener_analyze_promoted=os.getenv('SCREENER_ANALYZE_PROMOTED', 'false').lower() == 'true',
             screener_promote_days=int(os.getenv('SCREENER_PROMOTE_DAYS', '5')),
             screener_push_days=int(os.getenv('SCREENER_PUSH_DAYS', '5')),
             screener_strong_days=int(os.getenv('SCREENER_STRONG_DAYS', '10')),

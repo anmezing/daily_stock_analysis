@@ -22,6 +22,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Minimum pullback entry-zone width, in ATR multiples.
 MIN_ENTRY_ZONE_ATR = 0.3
+# Holding horizon of the plan's time stop, in trading sessions.  The screener
+# imports this so its earnings filter covers the whole holding period.
+TIME_STOP_TRADING_DAYS = 10
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -268,10 +271,10 @@ def build_trade_plan(context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         else "论点失效：放量跌破近期低点；财报不及预期或 guidance 下修；出现重大利空"
     )
     time_stop = (
-        f"买入后 10 个交易日仍未突破 {target_1:.2f}，且收盘跌破 MA10"
+        f"买入后 {TIME_STOP_TRADING_DAYS} 个交易日仍未突破 {target_1:.2f}，且收盘跌破 MA10"
         f"（{ma10:.2f}）→ 退出，不占用资金"
         if ma10
-        else f"买入后 10 个交易日仍未突破 {target_1:.2f} → 重新评估，避免长期占用资金"
+        else f"买入后 {TIME_STOP_TRADING_DAYS} 个交易日仍未突破 {target_1:.2f} → 重新评估，避免长期占用资金"
     )
     basis = f"ATR14={atr:.2f}（{atr_pct:.1f}%）"
     if ma20:

@@ -7,9 +7,12 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from datetime import datetime, timedelta
+
 from src.services.stock_screener_service import (
     Candidate,
     StockScreenerService,
+    _next_earnings_day,
     score_metrics,
 )
 
@@ -224,6 +227,119 @@ class StockScreenerTest(unittest.TestCase):
         result = service.screen(top_n=3)
         self.assertEqual(result["picks"], [])
         self.assertGreater(result["filters"]["earnings_skipped"], 0)
+
+    def _earnings_service(self, info):
+        return StockScreenerService(
+            themes_service=_Themes(),
+            candidate_provider=_candidates,
+            history_provider=_history,
+            fundamental_provider=lambda symbols: {symbol: dict(info) for symbol in symbols},
+            cache_ttl_seconds=0,
+        )
+
+    def test_earnings_inside_holding_horizon_is_skipped(self) -> None:
+        # 12 calendar days out was outside the old 3-day window, but a
+        # 10-session time stop would hold through the report.
+        result = self._earnings_service({"days_to_earnings": 12, "quality_ok": True}).screen(top_n=3)
+        self.assertEqual(result["picks"], [])
+        self.assertGreater(result["filters"]["earnings_skipped"], 0)
+
+    def test_earnings_beyond_holding_horizon_is_kept(self) -> None:
+        far = (datetime.now() + timedelta(days=60)).date().isoformat()
+        result = self._earnings_service(
+            {"earnings_date": far, "days_to_earnings": 60, "quality_ok": True}
+        ).screen(top_n=3)
+        self.assertTrue(result["picks"])
+        self.assertEqual(result["filters"]["earnings_skipped"], 0)
+
+    def test_next_earnings_day_skips_past_report(self) -> None:
+        past = (datetime.now() - timedelta(days=80)).timestamp()
+        upcoming = datetime.now() + timedelta(days=5)
+        self.assertEqual(_next_earnings_day(past, upcoming.timestamp()), upcoming.date())
+        self.assertIsNone(_next_earnings_day(past, None))
+
+    def test_sector_mismatch_is_skipped(self) -> None:
+        # DDD is screened under XLV but its own sector is consumer-defensive
+        # (the BTI case): its RS-vs-XLV score is meaningless.
+        sectors = {"AAA": "technology", "BBB": "technology", "CCC": "financial-services",
+                   "DDD": "consumer-defensive"}
+        service = StockScreenerService(
+            themes_service=_Themes(),
+            candidate_provider=_candidates,
+            history_provider=_history,
+            fundamental_provider=lambda symbols: {
+                symbol: {"quality_ok": True, "sector_key": sectors.get(symbol)}
+                for symbol in symbols
+            },
+            cache_ttl_seconds=0,
+        )
+        result = service.screen(top_n=5)
+        symbols = {pick["symbol"] for pick in result["picks"]}
+        self.assertNotIn("DDD", symbols)
+        self.assertTrue(symbols)
+        self.assertEqual(result["filters"]["sector_mismatch_skipped"], 1)
+        self.assertIn("板块不符 1 只", StockScreenerService.render_markdown(result))
+
+    def test_unknown_sector_is_kept(self) -> None:
+        result = self._earnings_service({"quality_ok": True}).screen(top_n=5)
+        self.assertTrue(result["picks"])
+        self.assertEqual(result["filters"]["sector_mismatch_skipped"], 0)
+
+    def test_unverified_fundamentals_are_flagged_in_report(self) -> None:
+        # The fixture's correlation filter leaves only AAA; make it unverified.
+        result = self._earnings_service({"quality_ok": None}).screen(top_n=5)
+        self.assertEqual([pick["symbol"] for pick in result["picks"]], ["AAA"])
+
+        markdown = StockScreenerService.render_markdown(result, top_n=5)
+        self.assertIn("基本面未核验 1 只（AAA）", markdown)
+        row = next(line for line in markdown.splitlines() if line.startswith("|") and "| AAA |" in line)
+        self.assertIn("⚠️未核验", row)
+        self.assertIn("- ⚠️ 基本面未核验：质量过滤未生效", markdown)
+
+    def test_fully_verified_report_has_no_warning(self) -> None:
+        result = self._earnings_service({"quality_ok": True}).screen(top_n=5)
+        self.assertNotIn("未核验", StockScreenerService.render_markdown(result, top_n=5))
+
+    def test_short_term_pop_without_mid_term_leadership_is_skipped(self) -> None:
+        def ramp(days: int, flat: int, slope: float, volume: float):
+            series = _series(slope=0.0, days=flat, volume=volume)
+            tail = _series(start=series["close"][-1], slope=slope, days=days - flat, volume=volume)
+            return {key: series[key] + tail[key] for key in series}
+
+        def history(symbols):
+            data = {}
+            for symbol in symbols:
+                if symbol in ("XLK", "XLF", "XLV"):
+                    data[symbol] = _series(slope=0.0005, days=200, volume=5_000_000)
+                elif symbol == "AAA":
+                    # Flat for ~6 months, then a 30-day pop: strong 15/30-day
+                    # numbers but it lagged XLK over the 6-1 month window.
+                    data[symbol] = ramp(200, 170, 0.004, 8_000_000)
+                else:
+                    data[symbol] = _series(slope=0.004, days=200, volume=8_000_000)
+            return data
+
+        service = StockScreenerService(
+            themes_service=_Themes(),
+            candidate_provider=_candidates,
+            history_provider=history,
+            fundamental_provider=lambda symbols: {s: {"quality_ok": True} for s in symbols},
+            cache_ttl_seconds=0,
+        )
+        result = service.screen(top_n=5)
+        symbols = {pick["symbol"] for pick in result["picks"]}
+        self.assertNotIn("AAA", symbols)
+        self.assertTrue(symbols)
+        self.assertGreaterEqual(result["filters"]["mid_momentum_skipped"], 1)
+        self.assertTrue(all(pick["rs_6_1"] > 0 for pick in result["picks"]))
+        self.assertIn("中期动量", StockScreenerService.render_markdown(result))
+
+    def test_short_history_skips_mid_term_gate(self) -> None:
+        # Default fixture has 120 bars (< 6 months): the gate must not fire.
+        result = self._earnings_service({"quality_ok": True}).screen(top_n=5)
+        self.assertTrue(result["picks"])
+        self.assertEqual(result["filters"]["mid_momentum_skipped"], 0)
+        self.assertIsNone(result["picks"][0]["rs_6_1"])
 
     def test_low_quality_name_is_skipped(self) -> None:
         service = StockScreenerService(

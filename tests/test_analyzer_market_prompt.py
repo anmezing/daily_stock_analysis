@@ -97,6 +97,8 @@ class TestAnalyzerMarketPrompt(unittest.TestCase):
         self.assertIn("breakout retest", prompt)
         self.assertIn("不要机械套用 A股 MA5/MA10 模式", prompt)
         self.assertIn("优先看趋势延续/突破确认，再结合财报、市场环境和估值", prompt)
+        # Earnings window follows the trade plan's holding horizon.
+        self.assertIn("下次财报日是否在 10 个交易日内（交易计划的持仓期）", prompt)
 
     def test_cn_prompt_keeps_a_share_policy_focus(self) -> None:
         analyzer = self._make_analyzer()

@@ -34,7 +34,7 @@ from src.agent.llm_adapter import get_thinking_extra_body
 from src.config import Config, get_config, get_api_keys_for_model, extra_litellm_params, get_configured_llm_models
 from src.core.llm_rate_limiter import get_llm_rate_limiter, get_rate_limit_bucket
 from src.core.signal_semantics import infer_signal
-from src.core.trade_plan import apply_trade_plan_fallback, build_trade_plan
+from src.core.trade_plan import TIME_STOP_TRADING_DAYS, apply_trade_plan_fallback, build_trade_plan
 from src.core.trading_calendar import get_market_for_stock
 from src.storage import persist_llm_usage
 from src.data.stock_mapping import STOCK_NAME_MAP
@@ -2794,13 +2794,13 @@ class GeminiAnalyzer:
         """Return market-aware checklist questions for the LLM."""
         market = self._resolve_market_context(context).get("market", "cn")
         if market == "us":
-            return """### 重点关注（必须明确回答）：
+            return f"""### 重点关注（必须明确回答）：
 1. SEC/财报/公司指引是否出现超预期或下修？
 2. `China exposure` 是高/中/低？中国政策是否应该成为核心因子，还是只能低权重引用？
 3. 是否存在 insider selling、诉讼、监管调查、short interest 或 put/call 异动？
 4. 估值与业绩增速是否匹配？消息面会不会改变估值锚？
 5. 技术面是否支持趋势跟踪、breakout retest、earnings gap hold 或回踩再进？不要机械套用 A股 MA5/MA10 模式。
-6. **财报窗口**：下次财报日是否在 3 个交易日内？若是，是否应该等财报后再买 / 降低仓位？
+6. **财报窗口**：下次财报日是否在 {TIME_STOP_TRADING_DAYS} 个交易日内（交易计划的持仓期）？若是，是否应该等财报后再买 / 降低仓位？
 7. **现在到底该买、该等、还是该卖？** 写出触发价格/信号；如果结论是持有或观望，必须写清“什么条件下卖出、什么条件下加仓”。"""
         if market == "hk":
             return """### 重点关注（必须明确回答）：

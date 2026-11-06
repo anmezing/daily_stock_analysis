@@ -25,12 +25,12 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from threading import RLock
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
-from src.core.trade_plan import build_trade_plan
+from src.core.trade_plan import TIME_STOP_TRADING_DAYS, build_trade_plan
 from src.services.screener_learning_service import get_screener_learning_service
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,9 @@ NASDAQ_SECTOR: Dict[str, str] = {
     "XLRE": "Real Estate",
 }
 
-EARNINGS_BLACKOUT_DAYS = 3
+# Skip names reporting within the plan's holding horizon (trading sessions):
+# a swing stop cannot protect against an earnings gap.
+EARNINGS_BLACKOUT_SESSIONS = TIME_STOP_TRADING_DAYS
 MIN_MARKET_CAP = 300_000_000
 MIN_REVENUE_GROWTH = -0.10
 MIN_PROFIT_MARGIN = -0.10
@@ -170,6 +172,24 @@ def _return_pct(closes: Sequence[float], days: int) -> Optional[float]:
     return round((closes[-1] / base - 1.0) * 100.0, 2)
 
 
+# Medium-term momentum: ~6 months, skipping the most recent ~1 month, which
+# tends to mean-revert.  Used as an entry gate: short-term setups only count
+# when the stock has also led its sector over the medium term.
+MOMENTUM_LOOKBACK_BARS = 126
+MOMENTUM_SKIP_BARS = 21
+
+
+def _momentum_6_1(closes: Sequence[float]) -> Optional[float]:
+    """Return (%) from ~6 months ago to ~1 month ago; None if history is short."""
+    if len(closes) <= MOMENTUM_LOOKBACK_BARS:
+        return None
+    base = closes[-1 - MOMENTUM_LOOKBACK_BARS]
+    end = closes[-1 - MOMENTUM_SKIP_BARS]
+    if base <= 0:
+        return None
+    return round((end / base - 1.0) * 100.0, 2)
+
+
 def _return_pct_at(closes: Sequence[float], index: int, days: int) -> Optional[float]:
     if index < days or index >= len(closes) or days <= 0:
         return None
@@ -188,6 +208,52 @@ def _daily_returns(closes: Sequence[float], window: int = 60) -> List[float]:
         for index in range(1, len(values))
         if values[index - 1]
     ]
+
+
+def _next_earnings_day(*timestamps: Any) -> Optional[date]:
+    """Earliest earnings date that is today or later.
+
+    yfinance's ``earningsTimestamp`` is often the *last* report; taking it
+    first would hide an upcoming ``earningsTimestampStart``.
+    """
+    today = datetime.now().date()
+    upcoming: List[date] = []
+    for raw in timestamps:
+        try:
+            if raw:
+                day = datetime.fromtimestamp(float(raw)).date()
+                if day >= today:
+                    upcoming.append(day)
+        except (TypeError, ValueError, OSError, OverflowError):
+            continue
+    return min(upcoming) if upcoming else None
+
+
+def _sessions_to_earnings(info: Dict[str, Any]) -> Optional[int]:
+    """Trading sessions from today until the next earnings date, if known."""
+    earnings_date = info.get("earnings_date")
+    if earnings_date:
+        try:
+            from src.core.trading_calendar import count_trading_sessions, get_market_today
+
+            earnings_day = date.fromisoformat(str(earnings_date)[:10])
+            today = get_market_today("us")
+            if earnings_day >= today:
+                return count_trading_sessions(today, earnings_day, "us")
+        except Exception as exc:
+            logger.debug("[选股] 财报交易日计算失败 %s: %s", earnings_date, exc)
+    days = info.get("days_to_earnings")
+    if days is None or days < 0:
+        return None
+    # Calendar -> trading days: weekends only, so never over-count sessions.
+    return (int(days) * 5) // 7
+
+
+def _yahoo_sector_key(info: Dict[str, Any]) -> Optional[str]:
+    """Normalise yfinance's sector to a SECTOR_KEYS key (e.g. consumer-defensive)."""
+    raw = info.get("sectorKey") or info.get("sector")
+    key = re.sub(r"[\s_]+", "-", str(raw or "").strip().lower())
+    return key or None
 
 
 def _correlation(left: Sequence[float], right: Sequence[float]) -> float:
@@ -338,7 +404,7 @@ class StockScreenerService:
         filing_provider: Any = None,
         learning_service: Any = None,
         cache_ttl_seconds: int = 900,
-        earnings_blackout_days: int = EARNINGS_BLACKOUT_DAYS,
+        earnings_blackout_sessions: int = EARNINGS_BLACKOUT_SESSIONS,
     ) -> None:
         self._themes_service = themes_service
         self._candidate_provider = candidate_provider or self._default_candidates
@@ -347,7 +413,7 @@ class StockScreenerService:
         self._filing_provider = filing_provider
         self._learning = learning_service
         self._cache_ttl = max(0, int(cache_ttl_seconds))
-        self._earnings_blackout_days = max(0, int(earnings_blackout_days))
+        self._earnings_blackout_sessions = max(0, int(earnings_blackout_sessions))
         self._candidate_cache: Dict[str, Dict[str, Any]] = {}
         self._fundamental_cache: Dict[str, Dict[str, Any]] = {}
         self._lock = RLock()
@@ -433,9 +499,11 @@ class StockScreenerService:
             sector_returns[etf] = {
                 "return_15d": _return_pct(closes, 15),
                 "return_30d": _return_pct(closes, 30),
+                "momentum_6_1": _momentum_6_1([float(v) for v in closes if _to_float(v)]),
             }
 
         picks: List[Dict[str, Any]] = []
+        mid_momentum_skipped = 0
         for candidate in candidates:
             payload = history.get(candidate.symbol) or {}
             metrics = self._build_metrics(payload)
@@ -457,8 +525,21 @@ class StockScreenerService:
             if metrics.get("rs_15d") is None:
                 # No sector benchmark -> do not pretend the stock is a leader.
                 continue
+            sector_mom = sector.get("momentum_6_1")
+            stock_mom = metrics.get("momentum_6_1")
+            metrics["rs_6_1"] = (
+                round(stock_mom - sector_mom, 2)
+                if stock_mom is not None and sector_mom is not None
+                else None
+            )
             score = score_metrics(metrics, candidate.sector_rank, risk_on=risk_on)
             if score["score"] <= 0:
+                continue
+            if metrics["rs_6_1"] is not None and metrics["rs_6_1"] <= 0:
+                # A 15/30-day pop without medium-term leadership is the
+                # short-term-reversal zone, not a sector leader.  Unknown
+                # (short history) is kept: new listings are not penalised.
+                mid_momentum_skipped += 1
                 continue
             plan = self._build_plan(metrics, payload)
             picks.append({
@@ -474,6 +555,7 @@ class StockScreenerService:
 
         picks.sort(key=lambda item: item["score"], reverse=True)
         picks, filter_stats = self._apply_quality_filters(picks, top_n)
+        filter_stats["mid_momentum_skipped"] = mid_momentum_skipped
         picks, filing_stats = self._apply_filing_risk(picks)
         filter_stats.update(filing_stats)
 
@@ -630,7 +712,12 @@ class StockScreenerService:
         top_n: int,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
         """Drop earnings-window and low-quality names before final ranking."""
-        stats = {"earnings_skipped": 0, "quality_skipped": 0, "quality_unknown": 0}
+        stats = {
+            "sector_mismatch_skipped": 0,
+            "earnings_skipped": 0,
+            "quality_skipped": 0,
+            "quality_unknown": 0,
+        }
         prefilter = picks[: max(int(top_n or 10) * 4, 15)]
         if not prefilter:
             return [], stats
@@ -654,8 +741,18 @@ class StockScreenerService:
                 "return_on_equity": info.get("return_on_equity"),
             })
 
-            days = info.get("days_to_earnings")
-            if days is not None and 0 <= days <= self._earnings_blackout_days:
+            # Universe sectors come from Nasdaq's classification, but relative
+            # strength is measured against the SPDR ETF.  When the stock's own
+            # sector is a different one (BTI: Nasdaq "Health Care", actually
+            # consumer-defensive), the RS score compares it to the wrong
+            # benchmark, so drop it.  Unknown sector -> keep (fail-open).
+            expected_key = (SECTOR_KEYS.get(pick.get("sector_etf") or "") or ("",))[0]
+            actual_key = info.get("sector_key")
+            if expected_key and actual_key and actual_key != expected_key:
+                stats["sector_mismatch_skipped"] += 1
+                continue
+            sessions = _sessions_to_earnings(info)
+            if sessions is not None and sessions <= self._earnings_blackout_sessions:
                 stats["earnings_skipped"] += 1
                 continue
             if info.get("quality_ok") is False:
@@ -845,6 +942,7 @@ class StockScreenerService:
             "return_5d": _return_pct(closes, 5),
             "return_15d": _return_pct(closes, 15),
             "return_30d": _return_pct(closes, 30),
+            "momentum_6_1": _momentum_6_1(closes),
             "ma5": round(ma5, 2) if ma5 else None,
             "ma10": round(ma10, 2) if ma10 else None,
             "ma20": round(ma20, 2),
@@ -923,18 +1021,15 @@ class StockScreenerService:
             except Exception:
                 return symbol, {}
 
-            earnings_ts = info.get("earningsTimestamp") or info.get("earningsTimestampStart")
             earnings_date = None
             days_to_earnings = None
-            try:
-                if earnings_ts:
-                    earnings_dt = datetime.fromtimestamp(float(earnings_ts))
-                    earnings_date = earnings_dt.strftime("%Y-%m-%d")
-                    days_to_earnings = (earnings_dt.date() - datetime.now().date()).days
-                    if days_to_earnings is not None and days_to_earnings < 0:
-                        days_to_earnings = None
-            except (TypeError, ValueError, OSError, OverflowError):
-                pass
+            earnings_day = _next_earnings_day(
+                info.get("earningsTimestamp"),
+                info.get("earningsTimestampStart"),
+            )
+            if earnings_day is not None:
+                earnings_date = earnings_day.isoformat()
+                days_to_earnings = (earnings_day - datetime.now().date()).days
 
             revenue_growth = _to_float(info.get("revenueGrowth"))
             profit_margin = _to_float(info.get("profitMargins"))
@@ -979,6 +1074,7 @@ class StockScreenerService:
                 notes.append("基本面数据缺失")
 
             return symbol, {
+                "sector_key": _yahoo_sector_key(info),
                 "earnings_date": earnings_date,
                 "days_to_earnings": days_to_earnings,
                 "market_cap": market_cap,
@@ -1234,9 +1330,20 @@ class StockScreenerService:
         filters = result.get("filters") or {}
         if any(filters.values()):
             lines.append(
-                f"> 过滤：财报窗口 {filters.get('earnings_skipped', 0)} 只 / "
+                f"> 过滤：中期动量 {filters.get('mid_momentum_skipped', 0)} 只 / "
+                f"板块不符 {filters.get('sector_mismatch_skipped', 0)} 只 / "
+                f"财报窗口 {filters.get('earnings_skipped', 0)} 只 / "
                 f"质量 {filters.get('quality_skipped', 0)} 只 / "
                 f"相关性 {filters.get('correlation_skipped', 0)} 只"
+            )
+            lines.append("")
+        shown = (result.get("picks") or [])[:top_n]
+        unverified = [item for item in shown if item.get("quality_ok") is None]
+        if unverified:
+            lines.append(
+                f"> ⚠️ 基本面未核验 {len(unverified)} 只"
+                f"（{', '.join(str(item.get('symbol')) for item in unverified)}）："
+                "数据源未返回市值/营收/利润率/负债，质量过滤未生效，仅扣分保留，需自行核实"
             )
             lines.append("")
         learning = result.get("learning") or {}
@@ -1260,7 +1367,8 @@ class StockScreenerService:
                 f"| {item.get('sector_name')} | {item.get('symbol')} | {item.get('name')} | "
                 f"{_pct(item.get('return_15d'))} | {_pct(item.get('return_30d'))} | "
                 f"{_pct(item.get('rs_15d'))} | {_pct(item.get('dist_ma20_pct'))} | "
-                f"{item.get('volume_ratio_5_20') or 'N/A'} | {item.get('state_label')} | "
+                f"{item.get('volume_ratio_5_20') or 'N/A'} | {item.get('state_label')}"
+                f"{' ⚠️未核验' if item.get('quality_ok') is None else ''} | "
                 f"{item.get('score')} |"
             )
 
@@ -1283,6 +1391,11 @@ class StockScreenerService:
             lines.extend([
                 f"**{item.get('symbol')} {item.get('name')}**（{item.get('state_label')}）",
                 f"- 为什么：{item.get('reason')}",
+                *(
+                    ["- ⚠️ 基本面未核验：质量过滤未生效，入场前先自行确认财务状况"]
+                    if item.get("quality_ok") is None
+                    else []
+                ),
                 f"- 买入：{plan.get('buy_trigger')}",
                 f"- 止损：{plan.get('stop_loss')} | 目标1：{plan.get('target_1')} | "
                 f"目标2：{plan.get('target_2')} | 盈亏比：{plan.get('risk_reward')}",

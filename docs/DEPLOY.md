@@ -241,8 +241,9 @@ os.environ["https_proxy"] = "http://your-proxy:port"
 
 选股与每日分析是两条独立链路：
 
-- `analyzer`：10:00 ET 分析自选股
+- `analyzer`：16:30 ET（收盘后）分析自选股，使用完整日线
 - `screener`：08:30 ET 选股，独立 state/日志/报告，不修改 `STOCK_LIST`
+- 选股要求候选股近 6 个月（剔除最近 1 个月）跑赢所在板块 ETF，只有 15/30 天短线上涨、中期落后板块的不入选；历史不足半年的新股不受此限制
 
 ### 部署
 
@@ -261,9 +262,11 @@ SCREENER_RUN_IMMEDIATELY=false
 SCREENER_PROMOTE_DAYS=5
 SCREENER_PUSH_DAYS=5
 SCREENER_STRONG_DAYS=10
+SCREENER_ANALYZE_PROMOTED=false
 ```
 
 - `SCREENER_PROMOTE_DAYS=5`：连续在池 5 个交易日才晋级“买入候选”
+- `SCREENER_ANALYZE_PROMOTED=true`：每次定时选股后，对当天**新晋级**（买入候选/触发买入）的标的自动跑 LLM 深度分析，每次最多 5 只、只分析个股不做大盘复盘；会额外消耗 LLM 额度，默认关闭
 - 3 天只算“观察确认”，不推送
 - 10 天标记“强确认”
 - 板块需在最近 5 天里至少 3 天留在 Top 3，避免“个股还在池、板块已退潮”
@@ -676,7 +679,7 @@ chmod 600 .env
 
 - **`SCHEDULE_ENABLED=false`**：分容器部署时必须保持 false。`server` 容器用 `--serve-only`，`analyzer` 容器用 `--schedule`；设成 true 会让 `server` 也进入定时模式，网页就打不开了。
 - **`RUN_IMMEDIATELY=false`**：只让"起 Web 且常驻"的进程跳过启动即分析。`analyzer` 容器里裸跑 `main.py` 是纯一次性命令，仍会正常执行分析，不会被这个开关静默成空转。
-- **`TZ`**：`.env` 里是服务器时区；`analyzer` 容器在 compose 中固定为 `America/New_York`，所以 `SCHEDULE_TIME=10:00` 就是美股 10:00 ET。
+- **`TZ`**：`.env` 里是服务器时区；`analyzer` 容器在 compose 中固定为 `America/New_York`，所以 `SCHEDULE_TIME=16:30` 就是美股 16:30 ET（收盘后 30 分钟）。不建议设在盘中：当日 K 线不完整，均线、量比和形态判断到收盘可能已经变了。
 - **`API_PORT`**：Docker 映射到宿主机的端口；Caddy 反代 `127.0.0.1:8000`。`WEBUI_PORT` 是容器内端口，两者不要混。
 - **`MARKET_REVIEW_REGION`**：只做美股/港股时设为 `us` / `hk` / `hk+us` / `all`，不要留默认的 `cn`；组合写法兼容 `us/hk`、`us,hk`。
 - **`REALTIME_SOURCE_PRIORITY`** 只对 A 股生效；美股/港股走各自的优先链，不需要改。
@@ -769,15 +772,15 @@ docker compose -f docker/docker-compose.server.yml run --rm -T \
 启动后应当看到这两行：
 
 ```
-INFO | src/scheduler.py | 已设置每日定时任务，执行时间: 10:00
-INFO | src/scheduler.py | 调度器开始运行... 下次执行时间: 2026-10-30 10:00:00
+INFO | src/scheduler.py | 已设置每日定时任务，执行时间: 16:30
+INFO | src/scheduler.py | 调度器开始运行... 下次执行时间: 2026-10-30 16:30:00
 ```
 
 三层保障：
 
 1. **正常运行**：到点自动执行，日志出现 `定时任务开始执行 - <时间>`，结束后写入 `analysis_history` 与 `reports/`。
-2. **重启补跑**：容器在 10:00 之后重启时，只要距计划时间不超过 6 小时且当天还没成功跑过，启动会立即补跑一次，日志为
-   `[Scheduler] 检测到今天 10:00 的计划任务尚未执行（上次成功: ...），立即补跑一次`。
+2. **重启补跑**：容器在 16:30 之后重启时，只要距计划时间不超过 6 小时且当天还没成功跑过，启动会立即补跑一次，日志为
+   `[Scheduler] 检测到今天 16:30 的计划任务尚未执行（上次成功: ...），立即补跑一次`。
    执行状态记录在 `data/.schedule_state.json`。
 3. **失败告警**：整轮任务抛异常时会通过已配置的通知渠道推送一条 `⚠️ 定时分析执行失败`（含原因与排查命令）。
 
@@ -863,7 +866,7 @@ pg_dump -U dsa -d dsa -Fc > /backup/dsa-$(date +%F).dump
   如果系统已启用 ufw，则改用 `ufw allow 80,443/tcp`，不要两套规则混用。
 - **ARM 构建**：`node:20-slim` / `python:3.11-slim-bookworm` 都有 arm64 镜像；Dockerfile 已把 `wkhtmltopdf` 改为可选，ARM 上缺失时图片推送自动回退文本，不影响构建。
 - **PostgreSQL**：Ubuntu 24.04 是 16、22.04 是 14，配置路径 `/etc/postgresql/<版本>/main/`；`psycopg2-binary` 已有 arm64 wheel。
-- **时区/调度**：`analyzer` 容器固定 `TZ=America/New_York`，在 `.env` 设 `SCHEDULE_TIME=10:00` 即美股开盘后 30 分钟；港股若也要开盘跑，用宿主机 cron 额外执行一次一次性任务。
+- **时区/调度**：`analyzer` 容器固定 `TZ=America/New_York`，在 `.env` 设 `SCHEDULE_TIME=16:30` 即美股收盘后 30 分钟（用完整日线）；港股若也要开盘跑，用宿主机 cron 额外执行一次一次性任务。
 
 ### 9. 后续从 Supabase 迁移
 

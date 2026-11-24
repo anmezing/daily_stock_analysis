@@ -119,7 +119,7 @@ const fieldDescriptionMap: Record<string, string> = {
   AGENT_MEMORY_ENABLED: "启用记忆与校准系统，追踪历史分析准确率并自动调节置信度。",
   BACKTEST_ENABLED: '是否启用回测功能（true/false）。',
   BACKTEST_EVAL_WINDOW_DAYS: '回测评估窗口长度，单位为交易日。',
-  BACKTEST_MIN_AGE_DAYS: '仅回测早于该天数的分析记录。',
+  BACKTEST_MIN_AGE_DAYS: '仅回测早于该天数的分析记录；留空=按窗口分别计算（1日窗口次日即评），0=不限。',
   BACKTEST_ENGINE_VERSION: '回测引擎版本标识，用于区分结果版本。',
   BACKTEST_NEUTRAL_BAND_PCT: '中性区间阈值百分比，例如 2 表示 -2%~+2%。',
 };

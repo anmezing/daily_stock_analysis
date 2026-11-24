@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, delete, desc, func, select
@@ -77,10 +77,15 @@ class BacktestRepository:
         force: bool,
     ) -> List[AnalysisHistory]:
         """Return AnalysisHistory rows eligible for backtest."""
-        cutoff_dt = datetime.now() - timedelta(days=min_age_days)
+        # 按日期而不是精确时刻截断：1 日窗口在次日同一时段运行时，昨天 16:35 的分析
+        # 不应因为"还差几分钟满 24 小时"被漏掉。
+        cutoff_dt = datetime.combine(
+            date.today() - timedelta(days=max(0, int(min_age_days)) - 1),
+            time.min,
+        )
 
         with self.db.get_session() as session:
-            conditions = [AnalysisHistory.created_at <= cutoff_dt]
+            conditions = [AnalysisHistory.created_at < cutoff_dt]
             if code:
                 conditions.append(AnalysisHistory.code == code)
 

@@ -898,7 +898,7 @@ python main.py --debug
 | `BACKTEST_ENABLED` | `true` | 是否在每日分析后自动运行回测 |
 | `BACKTEST_EVAL_WINDOW_DAYS` | `10` | 评估窗口（交易日数） |
 | `BACKTEST_EXTRA_WINDOWS` | `1,5,20` | 额外评估的窗口（逗号分隔）；留空表示只评估主窗口 |
-| `BACKTEST_MIN_AGE_DAYS` | `14` | 仅回测 N 天前的记录，避免数据不完整 |
+| `BACKTEST_MIN_AGE_DAYS` | `auto` | 分析记录满 N 天才回测。`auto`/留空=按窗口分别计算（N 交易日窗口需 `N + 2×(N//5)` 个自然日：1→1、5→7、10→14、20→28，数据不足会自动次日重试）；填整数则所有窗口统一（0=不限） |
 | `BACKTEST_ENGINE_VERSION` | `v1` | 引擎版本号，升级逻辑时用于区分结果 |
 | `BACKTEST_ENTRY_MODE` | `next_open` | 入场价口径：`next_open` / `analysis_close` / `next_close` |
 | `BACKTEST_NEUTRAL_BAND_PCT` | `2.0` | 中性区间阈值（%），±2% 内视为震荡 |

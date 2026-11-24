@@ -102,6 +102,27 @@ def parse_env_int(
     return parsed
 
 
+def parse_backtest_min_age_days(value: Optional[str]) -> Optional[int]:
+    """Parse BACKTEST_MIN_AGE_DAYS.
+
+    Empty / ``auto`` -> ``None``: each evaluation window gets its own minimum
+    age (see ``BacktestService.min_age_days_for_window``), so a 1-day window is
+    scored the next day instead of waiting as long as the 10-day window.
+    An explicit integer (``0`` = no limit) applies the same age to every window.
+    """
+    raw = str(value or "").strip().lower()
+    if not raw or raw == "auto":
+        return None
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "BACKTEST_MIN_AGE_DAYS=%r is not an integer or 'auto'; using per-window ages",
+            value,
+        )
+        return None
+
+
 def parse_env_float(
     value: Optional[str],
     default: float,
@@ -710,7 +731,7 @@ class Config:
     backtest_enabled: bool = True
     backtest_eval_window_days: int = 10
     backtest_extra_windows: str = "1,5,20"
-    backtest_min_age_days: int = 14
+    backtest_min_age_days: Optional[int] = None  # None = per-window ages
     backtest_engine_version: str = "v1"
     backtest_neutral_band_pct: float = 2.0
     backtest_entry_mode: str = "next_open"
@@ -1367,7 +1388,7 @@ class Config:
             backtest_enabled=os.getenv('BACKTEST_ENABLED', 'true').lower() == 'true',
             backtest_eval_window_days=int(os.getenv('BACKTEST_EVAL_WINDOW_DAYS', '10')),
             backtest_extra_windows=os.getenv('BACKTEST_EXTRA_WINDOWS', '1,5,20').strip(),
-            backtest_min_age_days=int(os.getenv('BACKTEST_MIN_AGE_DAYS', '14')),
+            backtest_min_age_days=parse_backtest_min_age_days(os.getenv('BACKTEST_MIN_AGE_DAYS')),
             backtest_engine_version=os.getenv('BACKTEST_ENGINE_VERSION', 'v1'),
             backtest_neutral_band_pct=float(os.getenv('BACKTEST_NEUTRAL_BAND_PCT', '2.0')),
             backtest_entry_mode=os.getenv('BACKTEST_ENTRY_MODE', 'next_open').strip().lower() or 'next_open',

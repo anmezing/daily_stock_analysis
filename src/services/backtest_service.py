@@ -21,7 +21,7 @@ from src.repositories.backtest_repo import BacktestRepository
 from src.repositories.stock_repo import StockRepository
 from src.services.analysis_calibration_model import SmallCalibrationModel
 from src.services.benchmark_service import BenchmarkService
-from src.core.trading_calendar import get_market_for_stock
+from src.core.trading_calendar import get_market_for_stock, get_market_session, get_market_today
 from src.storage import BacktestResult, BacktestSummary, DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,8 @@ class BacktestService:
             else getattr(config, "backtest_eval_window_days", 10)
         )
         if min_age_days is None:
-            min_age_days = getattr(config, "backtest_min_age_days", 14)
+            # None (config default) = per-window ages; an explicit int pins every window.
+            min_age_days = getattr(config, "backtest_min_age_days", None)
         engine_version = getattr(config, "backtest_engine_version", "v1")
         neutral_band_pct = float(getattr(config, "backtest_neutral_band_pct", 2.0))
         entry_mode = BacktestEngine._normalize_entry_mode(
@@ -88,7 +89,7 @@ class BacktestService:
                 code=code,
                 force=force,
                 eval_window_days=int(window),
-                min_age_days=int(min_age_days),
+                min_age_days=self._resolve_min_age_days(int(window), min_age_days),
                 limit=int(limit),
                 effective_engine_version=effective_engine_version,
                 eval_config=eval_config,
@@ -103,6 +104,45 @@ class BacktestService:
             "windows": windows,
             "per_window": per_window,
         }
+
+    @staticmethod
+    def min_age_days_for_window(window: int) -> int:
+        """Earliest calendar age at which ``window`` trading days can follow the signal day.
+
+        Five trading days always span a weekend, so ``window`` sessions need at
+        least ``window + 2 * (window // 5)`` calendar days (1->1, 5->7, 10->14,
+        20->28).  Holidays or a Friday signal can still leave the window short;
+        those rows are saved as ``insufficient_data`` and retried next run.
+        """
+        window = max(1, int(window))
+        return window + 2 * (window // 5)
+
+    @classmethod
+    def _resolve_min_age_days(cls, window: int, configured: Optional[int]) -> int:
+        if configured is None:
+            return cls.min_age_days_for_window(window)
+        return max(0, int(configured))
+
+    @staticmethod
+    def _settled_bars(code: str, bars: List[Any]) -> List[Any]:
+        """Drop today's bar while that market's regular session is still running.
+
+        A short window can reach today's date; a mid-session bar is a moving
+        price, and a "completed" row built on it is never re-evaluated.
+        """
+        if not bars:
+            return bars
+        try:
+            market = get_market_for_stock(code)
+            if not market:
+                return bars
+            today = get_market_today(market)
+            if get_market_session(market) not in ("pre_market", "trading"):
+                return bars
+        except Exception as exc:  # fail-open: never block a backtest on calendar errors
+            logger.debug("回测会话判断失败(%s): %s", code, exc)
+            return bars
+        return [bar for bar in bars if getattr(bar, "date", None) is None or bar.date < today]
 
     def _resolve_windows(self, primary_window: int) -> List[int]:
         """Return the primary window plus configured extra horizons."""
@@ -199,18 +239,24 @@ class BacktestService:
                     )
                     continue
 
-                forward_bars = self.stock_repo.get_forward_bars(
-                    code=analysis.code,
-                    analysis_date=start_daily.date,
-                    eval_window_days=int(eval_window_days),
+                forward_bars = self._settled_bars(
+                    analysis.code,
+                    self.stock_repo.get_forward_bars(
+                        code=analysis.code,
+                        analysis_date=start_daily.date,
+                        eval_window_days=int(eval_window_days),
+                    ),
                 )
 
                 if len(forward_bars) < int(eval_window_days):
                     self._try_fill_daily_data(code=analysis.code, analysis_date=start_daily.date, eval_window_days=eval_window_days)
-                    forward_bars = self.stock_repo.get_forward_bars(
-                        code=analysis.code,
-                        analysis_date=start_daily.date,
-                        eval_window_days=int(eval_window_days),
+                    forward_bars = self._settled_bars(
+                        analysis.code,
+                        self.stock_repo.get_forward_bars(
+                            code=analysis.code,
+                            analysis_date=start_daily.date,
+                            eval_window_days=int(eval_window_days),
+                        ),
                     )
 
                 # 拆股/并股会在日线里留下 ±45% 以上的假跳变；这种窗口不能当真实收益回测。

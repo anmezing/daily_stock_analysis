@@ -10,10 +10,10 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
-from src.config import Config
+from src.config import Config, parse_backtest_min_age_days
 from src.core.backtest_engine import EXECUTION_LOGIC_REVISION, OVERALL_SENTINEL_CODE
 from src.services.backtest_service import BacktestService
 from src.repositories.backtest_repo import BacktestRepository
@@ -35,6 +35,7 @@ class BacktestServiceTestCase(unittest.TestCase):
                 "BACKTEST_EXTRA_WINDOWS",
                 "BACKTEST_SLIPPAGE_BPS",
                 "BACKTEST_BENCHMARK_ENABLED",
+                "BACKTEST_MIN_AGE_DAYS",
             )
         }
         os.environ["ENV_FILE"] = os.path.join(self._temp_dir.name, "empty.env")
@@ -677,6 +678,67 @@ class BacktestServiceTestCase(unittest.TestCase):
             self.assertEqual(overall.completed_count, 2)
             self.assertEqual(overall.win_count, 1)
 
+
+    def _make_recent_analysis(self, created_at: datetime) -> None:
+        """Move the fixture analysis to ``created_at`` (signal day stays 2024-01-01)."""
+        with self.db.get_session() as session:
+            row = session.query(AnalysisHistory).filter(AnalysisHistory.code == "600519").one()
+            row.created_at = created_at
+            session.commit()
+
+    def test_min_age_days_scale_with_window(self) -> None:
+        expected = {1: 1, 2: 2, 4: 4, 5: 7, 10: 14, 20: 28}
+        for window, age in expected.items():
+            self.assertEqual(BacktestService.min_age_days_for_window(window), age, window)
+
+    def test_parse_backtest_min_age_days(self) -> None:
+        self.assertIsNone(parse_backtest_min_age_days(None))
+        self.assertIsNone(parse_backtest_min_age_days(""))
+        self.assertIsNone(parse_backtest_min_age_days(" AUTO "))
+        self.assertIsNone(parse_backtest_min_age_days("soon"))
+        self.assertEqual(parse_backtest_min_age_days("0"), 0)
+        self.assertEqual(parse_backtest_min_age_days("14"), 14)
+
+    def test_short_window_scored_next_day_by_default(self) -> None:
+        # Analysed late yesterday: a 1-day window is due today even though less
+        # than 24 hours may have passed, while the 3-day primary window is not.
+        yesterday = datetime.combine(date.today() - timedelta(days=1), datetime.max.time())
+        self._make_recent_analysis(yesterday)
+        os.environ["BACKTEST_EXTRA_WINDOWS"] = "1"
+        Config._instance = None
+        service = BacktestService(self.db)
+
+        with patch.dict(os.environ, {"BACKTEST_MIN_AGE_DAYS": "auto"}):
+            Config._instance = None
+            stats = service.run_backtest(code="600519", limit=10)
+
+        self.assertEqual(stats["per_window"]["1"]["processed"], 1)
+        self.assertEqual(stats["per_window"]["1"]["completed"], 1)
+        self.assertEqual(stats["per_window"]["3"]["processed"], 0)
+
+    def test_explicit_min_age_applies_to_every_window(self) -> None:
+        self._make_recent_analysis(datetime.now() - timedelta(days=2))
+        os.environ["BACKTEST_EXTRA_WINDOWS"] = "1"
+        Config._instance = None
+        service = BacktestService(self.db)
+
+        with patch.dict(os.environ, {"BACKTEST_MIN_AGE_DAYS": "14"}):
+            Config._instance = None
+            stats = service.run_backtest(code="600519", limit=10)
+
+        self.assertEqual(stats["processed"], 0)
+
+    def test_unsettled_today_bar_is_ignored_during_session(self) -> None:
+        today = date(2024, 1, 4)
+        bars = [
+            StockDaily(code="AAPL", date=date(2024, 1, 3), close=1.0),
+            StockDaily(code="AAPL", date=today, close=2.0),
+        ]
+        with patch("src.services.backtest_service.get_market_today", return_value=today):
+            with patch("src.services.backtest_service.get_market_session", return_value="trading"):
+                self.assertEqual([b.date for b in BacktestService._settled_bars("AAPL", bars)], [date(2024, 1, 3)])
+            with patch("src.services.backtest_service.get_market_session", return_value="post_market"):
+                self.assertEqual(len(BacktestService._settled_bars("AAPL", bars)), 2)
 
 if __name__ == "__main__":
     unittest.main()

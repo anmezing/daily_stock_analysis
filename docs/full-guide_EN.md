@@ -644,7 +644,7 @@ Set the following variables in `.env` (all optional, have defaults):
 |----------|---------|-------------|
 | `BACKTEST_ENABLED` | `true` | Whether to auto-run backtest after daily analysis |
 | `BACKTEST_EVAL_WINDOW_DAYS` | `10` | Evaluation window (trading days) |
-| `BACKTEST_MIN_AGE_DAYS` | `14` | Only backtest records older than N days to avoid incomplete data |
+| `BACKTEST_MIN_AGE_DAYS` | `auto` | Minimum record age (days) before backtesting. `auto`/empty = per window (an N-trading-day window needs `N + 2×(N//5)` calendar days: 1→1, 5→7, 10→14, 20→28; short windows are retried next run); an integer applies to every window (0 = no limit) |
 | `BACKTEST_ENGINE_VERSION` | `v1` | Engine version, used to distinguish results when logic is updated |
 | `BACKTEST_ENTRY_MODE` | `next_open` | Entry price basis: `next_open` / `analysis_close` / `next_close` |
 | `BACKTEST_NEUTRAL_BAND_PCT` | `2.0` | Neutral band threshold (%), ±2% treated as range-bound |

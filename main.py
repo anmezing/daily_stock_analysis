@@ -662,7 +662,7 @@ def run_full_analysis(
                 stats = service.run_backtest(
                     force=False,
                     eval_window_days=getattr(config, 'backtest_eval_window_days', 10),
-                    min_age_days=getattr(config, 'backtest_min_age_days', 14),
+                    min_age_days=getattr(config, 'backtest_min_age_days', None),
                     limit=200,
                 )
                 logger.info(
